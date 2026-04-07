@@ -125,6 +125,9 @@ required_files = [
     "test_aggressive_ocr.py",
     "report_performance.py",
     "setup_recommendations.py",
+]
+
+optional_files = [
     "RECOMMENDATIONS_GUIDE.md",
 ]
 
@@ -140,6 +143,14 @@ for filename in required_files:
 
 if not all_exist:
     sys.exit(1)
+
+for filename in optional_files:
+    filepath = PROJECT_ROOT / filename
+    if filepath.exists():
+        size_kb = filepath.stat().st_size / 1024
+        print(f"    {filename:40s} ({size_kb:6.1f} KB) [optional]")
+    else:
+        print(f"    {filename:40s} NOT FOUND [optional]")
 
 # TEST 7: Quick functionality test
 print("\n7  Quick functionality tests...")

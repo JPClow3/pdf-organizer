@@ -74,7 +74,77 @@ except Exception:
 OCR_DPI = 300
 OCR_DPI_HIRES = 450  # DPI alto para documentos manuscritos
 OCR_LANG = "por"
-MAX_PAGES_TO_OCR = 2
+MAX_PAGES_TO_OCR = None  # Ler TODAS as páginas (sem limite)
+
+# Parâmetros de tuning (podem ser ajustados em scripts de calibração)
+UPSCALE_MIN_WIDTH = 2000
+PREPROCESS_ADAPTIVE_BLOCK_SIZE = 31
+PREPROCESS_ADAPTIVE_C = 10
+PREPROCESS_MEDIAN_BLUR = 3
+CLAHE_CLIP_LIMIT = 2.0
+CLAHE_TILE_GRID = (8, 8)
+TITLE_HINT_MIN_RATIO = 0.84
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_tuple_int(name: str, default: tuple[int, int]) -> tuple[int, int]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 2:
+        return default
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return default
+
+
+OCR_DPI = _env_int("OCR_TUNE_DPI", OCR_DPI)
+OCR_DPI_HIRES = _env_int("OCR_TUNE_DPI_HIRES", OCR_DPI_HIRES)
+UPSCALE_MIN_WIDTH = _env_int("OCR_TUNE_MIN_WIDTH", UPSCALE_MIN_WIDTH)
+PREPROCESS_ADAPTIVE_BLOCK_SIZE = _env_int("OCR_TUNE_BLOCK_SIZE", PREPROCESS_ADAPTIVE_BLOCK_SIZE)
+PREPROCESS_ADAPTIVE_C = _env_int("OCR_TUNE_ADAPTIVE_C", PREPROCESS_ADAPTIVE_C)
+PREPROCESS_MEDIAN_BLUR = _env_int("OCR_TUNE_MEDIAN", PREPROCESS_MEDIAN_BLUR)
+CLAHE_CLIP_LIMIT = _env_float("OCR_TUNE_CLAHE_CLIP", CLAHE_CLIP_LIMIT)
+CLAHE_TILE_GRID = _env_tuple_int("OCR_TUNE_CLAHE_GRID", CLAHE_TILE_GRID)
+TITLE_HINT_MIN_RATIO = _env_float("OCR_TUNE_TITLE_HINT_RATIO", TITLE_HINT_MIN_RATIO)
+
+# Garantias para parâmetros sensíveis do OpenCV
+if PREPROCESS_ADAPTIVE_BLOCK_SIZE < 3:
+    PREPROCESS_ADAPTIVE_BLOCK_SIZE = 3
+if PREPROCESS_ADAPTIVE_BLOCK_SIZE % 2 == 0:
+    PREPROCESS_ADAPTIVE_BLOCK_SIZE += 1
+
+if PREPROCESS_MEDIAN_BLUR < 1:
+    PREPROCESS_MEDIAN_BLUR = 1
+if PREPROCESS_MEDIAN_BLUR % 2 == 0:
+    PREPROCESS_MEDIAN_BLUR += 1
+
+if TITLE_HINT_MIN_RATIO < 0.5:
+    TITLE_HINT_MIN_RATIO = 0.5
+if TITLE_HINT_MIN_RATIO > 0.99:
+    TITLE_HINT_MIN_RATIO = 0.99
+
 DEFAULT_WATCH_INTERVAL_SECONDS = 15
 DEFAULT_FILE_STABILITY_SECONDS = 5.0
 DEFAULT_FILE_STABILITY_CHECKS = 3
@@ -516,6 +586,17 @@ DOC_TYPE_SIGNATURES = {
             r"Sr\s*[\.\(]",
         ],
     },
+    "ADVERTENCIA_ESCRITA": {
+        "required": [
+            r"ADVERT[ÊE]NCIA\s+ESCRITA",
+            r"COLABORADOR",
+        ],
+        "optional": [
+            r"TRANSPORTADORA",
+            r"CPF",
+            r"[Dd]isciplinar",
+        ],
+    },
     "ASO_ADMISSIONAL": {
         "required": [
             r"\bASO\b",
@@ -791,13 +872,14 @@ DOC_TYPE_PRIORITY = {
     "HOLERITE": 77,
     "PPP": 76,
     "AVALIACAO_MOTORISTA": 75,
+    "AP": 75,
+    "ADVERTENCIA_ESCRITA": 74,
     "TREINAMENTO_DIRECAO_DEFENSIVA": 74,
     "TESTE_CONHECIMENTOS_GERAIS": 73,
     "TESTE_PRATICO": 72,
     "PAPELETA_CONTROLE_JORNADA": 71,
     "QUESTIONARIO_ACOLHIMENTO": 70,
     "DECLARACAO_RACIAL": 69,
-    "AP": 75,
     "CONTRATO": 70,
     "DECLARACAO": 65,
     "RELATORIO_ABASTECIMENTO": 64,
@@ -850,7 +932,7 @@ def _normalize_for_ocr_match(text: str) -> str:
     return normalized
 
 
-def _line_matches_phrase(ocr_line: str, phrase: str, min_ratio: float = 0.84) -> bool:
+def _line_matches_phrase(ocr_line: str, phrase: str, min_ratio: float = TITLE_HINT_MIN_RATIO) -> bool:
     """Compara uma linha OCR com um termo alvo mesmo quando faltam letras."""
     line_norm = _normalize_for_ocr_match(ocr_line)
     phrase_norm = _normalize_for_ocr_match(phrase)
@@ -870,7 +952,7 @@ def _text_has_title_hint(text: str, phrases: list[str]) -> bool:
     lines = [line for line in lines if line]
     for phrase in phrases:
         for line in lines:
-            if _line_matches_phrase(line, phrase):
+            if _line_matches_phrase(line, phrase, min_ratio=TITLE_HINT_MIN_RATIO):
                 return True
     return False
 
@@ -1522,7 +1604,7 @@ def _to_gray(pil_image: Image.Image) -> np.ndarray:
     return img
 
 
-def _upscale_if_small(gray: np.ndarray, min_width: int = 2000) -> np.ndarray:
+def _upscale_if_small(gray: np.ndarray, min_width: int = UPSCALE_MIN_WIDTH) -> np.ndarray:
     """Aumenta escala da imagem se for menor que min_width."""
     h, w = gray.shape
     if w < min_width:
@@ -1540,11 +1622,11 @@ def preprocess_image(pil_image: Image.Image) -> Image.Image:
     # Threshold adaptativo (Gaussiano)
     binary = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 31, 10,
+        cv2.THRESH_BINARY, PREPROCESS_ADAPTIVE_BLOCK_SIZE, PREPROCESS_ADAPTIVE_C,
     )
 
     # Reducao de ruido
-    denoised = cv2.medianBlur(binary, 3)
+    denoised = cv2.medianBlur(binary, PREPROCESS_MEDIAN_BLUR)
     return Image.fromarray(denoised)
 
 
@@ -1576,7 +1658,7 @@ def _pil_to_gray_np(pil_image: Image.Image) -> np.ndarray:
 
 def _apply_clahe(gray: np.ndarray) -> np.ndarray:
     """Aumenta contraste local sem binarizacao agressiva."""
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_GRID)
     return clahe.apply(gray)
 
 
@@ -2081,7 +2163,8 @@ def extract_text_from_pdf(
 
     # --- Conversao unificada (apenas UMA VEZ) ---
     images = pdf_to_images(pdf_path, poppler_path, dpi=base_dpi)
-    pages_to_process = images[:MAX_PAGES_TO_OCR]
+    # Se MAX_PAGES_TO_OCR é None, processa TODAS as páginas; caso contrário, limita
+    pages_to_process = images if MAX_PAGES_TO_OCR is None else images[:MAX_PAGES_TO_OCR]
     
     # Cache de preprocessamentos (reutilizados nos passos)
     preprocessed_default = [preprocess_image(img) for img in pages_to_process]
@@ -2184,7 +2267,9 @@ def extract_text_from_pdf(
         try:
             hi_res_dpi = max(OCR_DPI_HIRES, base_dpi)
             hi_res_images = pdf_to_images(pdf_path, poppler_path, dpi=hi_res_dpi)
-            for i, img in enumerate(hi_res_images[:MAX_PAGES_TO_OCR]):
+            # Se MAX_PAGES_TO_OCR é None, processa TODAS as páginas
+            pages_to_process_hires = hi_res_images if MAX_PAGES_TO_OCR is None else hi_res_images[:MAX_PAGES_TO_OCR]
+            for i, img in enumerate(pages_to_process_hires):
                 # Preprocessamento leve (manuscrito degrada com binarizacao agressiva)
                 processed = preprocess_image_light(img)
                 config = build_ocr_config(psm=4)
@@ -2207,7 +2292,8 @@ def extract_text_from_pdf_adaptive(
 
     def _run_problematic_sequence_300() -> tuple[str, str | None]:
         images = pdf_to_images(pdf_path, poppler_path, dpi=OCR_DPI)
-        pages = images[:MAX_PAGES_TO_OCR]
+        # Se MAX_PAGES_TO_OCR é None, processa TODAS as páginas
+        pages = images if MAX_PAGES_TO_OCR is None else images[:MAX_PAGES_TO_OCR]
 
         attempts: list[tuple[str, list[Image.Image], int]] = [
             ("dpi300_psm3_light", [preprocess_image_light(img) for img in pages], 3),
@@ -2851,13 +2937,13 @@ def extract_fmm_data(text: str) -> dict:
                 result["name"] = cleaned
                 break
 
-    # Periodo: "Fechamento: 190 21/05/2025 a 20/06/2025"
+    # Periodo: "Fechamento: 190 21/05/2025 a 20/06/2025" -> usar APENAS data final
     period_pattern = r'[Ff]echamento\s*[:\-]\s*\d+\s+(\d{2}/\d{2}/\d{1,4})\s*a\s*(\d{2}/\d{2}/\d{1,4})'
     period_match = re.search(period_pattern, text)
     if period_match:
-        start = _correct_date_in_period(period_match.group(1))
+        # Usar APENAS a data final (group 2), não a inicial
         end = _correct_date_in_period(period_match.group(2))
-        result["period"] = f"{start} a {end}"
+        result["period"] = end
     else:
         # Fallback: "Referencia: 06/2025"
         ref_pattern = r'[Rr]efer.?ncia\s*[:\-]\s*(\d{2})/(\d{1,4})'
@@ -3131,6 +3217,128 @@ def extract_ap_data(text: str) -> dict:
     return result
 
 
+def extract_advertencia_escrita_data(text: str) -> dict:
+    """Extrai dados de Advertência Escrita Disciplinar."""
+    result: dict[str, str | None] = {"name": None, "period": None}
+
+    # Nome: "COLABORADOR(a): NOME" - extrair do campo COLABORADOR, não EMPREGADOR
+    name_patterns = [
+        # Formato 1: "COLABORADOR(a): NOME"
+        r'COLABORADOR\s*\(\s*a\s*\)\s*:\s*([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]{3,})',
+        # Formato 2: "COLABORADOR: NOME" (sem parênteses)
+        r'COLABORADOR\s*:\s*([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]{3,})',
+        # Formato 3: caixa mista/OCR errado
+        r'[Cc]olaborador\s*(\(a\))?\s*:\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+    ]
+    
+    for idx, pattern in enumerate(name_patterns):
+        match = re.search(pattern, text)
+        if match:
+            # Para o formato 3, o nome está no grupo 2
+            name_group = 2 if idx == 2 else 1
+            raw_name = match.group(name_group).strip()
+            # Remover "CPF" e similares que possam estar colados
+            raw_name = re.sub(r'\s*(CPF|CTPS|RG).*$', '', raw_name)
+            cleaned = clean_name(raw_name)
+            if cleaned and _is_valid_name_for_doc_type(cleaned, "ADVERTENCIA_ESCRITA"):
+                result["name"] = cleaned
+                break
+
+    # Data: DD/MM/YYYY no documento
+    date_patterns = [
+        r'(\d{2})/(\d{2})/(\d{1,4})',
+    ]
+    for pattern in date_patterns:
+        match = re.search(pattern, text)
+        if match:
+            day, month, year = match.group(1), match.group(2), correct_year(match.group(3))
+            result["period"] = f"{day}-{month}-{year}"
+            break
+
+    return result
+
+
+def detect_multiple_documents_in_pdf(text_pages: list[str], doc_type: str, logger: logging.Logger) -> list[dict]:
+    """Detecta múltiplos documentos (motoristas/fechamentos) em PDF com múltiplas páginas.
+    
+    Retorna lista de dicts com:
+    - name: nome do motorista
+    - closing_number: número de fechamento (se aplicável)
+    - page_indices: lista de índices de páginas que pertencem a este documento
+    - period: período do documento
+    """
+    if doc_type != "FMM" or not text_pages:
+        # Por enquanto, suporta apenas FMM com múltiplas páginas
+        return []
+    
+    documents = []
+    current_doc = None
+    
+    for page_idx, page_text in enumerate(text_pages):
+        # Tenta extrair dados de fechamento desta página
+        data = extract_fmm_data(page_text)
+        
+        if data.get("closing_number") or data.get("name"):
+            # Esta página pertence a um documento FMM
+            closing_num = data.get("closing_number")
+            name = data.get("name")
+            
+            # Se mudou motorista ou número, inicia novo documento
+            if not current_doc or current_doc["name"] != name:
+                if current_doc:
+                    documents.append(current_doc)
+                current_doc = {
+                    "name": name or "MOTORISTA DESCONHECIDO",
+                    "closing_numbers": [closing_num] if closing_num else [],
+                    "page_indices": [page_idx],
+                    "period": data.get("period"),
+                }
+            else:
+                # Mesmo motorista, adiciona número se diferente
+                if closing_num and closing_num not in current_doc["closing_numbers"]:
+                    current_doc["closing_numbers"].append(closing_num)
+                current_doc["page_indices"].append(page_idx)
+                # Atualiza período com a data mais recente
+                if data.get("period"):
+                    current_doc["period"] = data.get("period")
+    
+    # Adiciona último documento se existe
+    if current_doc:
+        documents.append(current_doc)
+    
+    logger.debug(f"Detectados {len(documents)} documentos em {len(text_pages)} páginas")
+    return documents
+
+def aggregate_multipage_closure(documents: list[dict]) -> list[dict]:
+    """Agrupa números de fechamento para motoristas que aparecem múltiplas vezes.
+    
+    Transforma:
+    - closing_numbers: [190, 191, 192] → período com todos os nros
+    - Mantém separado se motoristas diferentes
+    """
+    if len(documents) == 1:
+        # Apenas 1 motorista
+        doc = documents[0]
+        closing_str = "-".join(doc["closing_numbers"]) if doc.get("closing_numbers") else None
+        return [{
+            "name": doc["name"],
+            "closing_number": closing_str,
+            "period": doc["period"],
+            "page_indices": doc["page_indices"],
+        }]
+    
+    # Múltiplos motoristas - retorna cada um separado
+    result = []
+    for doc in documents:
+        closing_str = "-".join(doc["closing_numbers"]) if doc.get("closing_numbers") else None
+        result.append({
+            "name": doc["name"],
+            "closing_number": closing_str,
+            "period": doc["period"],
+            "page_indices": doc["page_indices"],
+        })
+    return result
+
 def extract_nf_data(text: str) -> dict:
     """Extrai dados de Nota Fiscal com fallback para emitente/destinatário."""
     result: dict[str, str | None] = {"name": None, "period": None}
@@ -3220,9 +3428,9 @@ def extract_relatorio_abastecimento_data(text: str) -> dict:
 
     range_match = re.search(r"(\d{2}/\d{2}/\d{1,4})\s*a\s*(\d{2}/\d{2}/\d{1,4})", text)
     if range_match:
-        start = _correct_date_in_period(range_match.group(1).replace("/", "-"))
+        # Usar APENAS a data final (group 2), não a inicial
         end = _correct_date_in_period(range_match.group(2).replace("/", "-"))
-        result["period"] = f"{start} a {end}"
+        result["period"] = end
     else:
         single_date = _extract_date_from_text(text)
         if single_date:
@@ -3251,6 +3459,7 @@ EXTRACTORS = {
     "FN": extract_fn_data,
     "MBV": extract_mbv_data,
     "AP": extract_ap_data,
+    "ADVERTENCIA_ESCRITA": extract_advertencia_escrita_data,
     "ASO_ADMISSIONAL": extract_aso_admissional_data,
     "ASO_DEMISSIONAL": extract_aso_demissional_data,
     "ATESTADO_MEDICO": extract_atestado_medico_data,
@@ -3305,6 +3514,7 @@ DOC_TYPE_LABELS = {
     "FN": "FOLHA NORMAL",
     "MBV": "MOVIMENTACAO BENEFICIARIO",
     "AP": "AVISO PREVIO",
+    "ADVERTENCIA_ESCRITA": "ADVERTENCIA ESCRITA",
     "ASO_ADMISSIONAL": "ASO ADMISSIONAL",
     "ASO_DEMISSIONAL": "ASO DEMISSIONAL",
     "ATESTADO_MEDICO": "ATESTADO MEDICO",
@@ -3422,7 +3632,7 @@ def quarantine_failed_pdf(pdf_path: Path, scanner_dir: Path, logger: logging.Log
 
 
 def move_to_review_queue(pdf_path: Path, scanner_dir: Path, logger: logging.Logger) -> Path | None:
-    """Move um PDF para fila de revisao manual."""
+    """Move um PDF com baixa confiança para fila de revisao manual."""
     review_dir = scanner_dir / REVIEW_DIR_NAME
     review_dir.mkdir(exist_ok=True)
 
@@ -3612,9 +3822,18 @@ def process_single_pdf(
                         return result
 
             if not result.extracted_name:
-                logger.warning(f"  Tipo={doc_type} mas nome nao encontrado - arquivo mantido sem alteracao")
-                result.status = ProcessStatus.UNIDENTIFIED
-                return result
+                # Fallback: se tipo foi identificado, renomear com tipo de documento no lugar do nome
+                if result.doc_type and result.doc_type != "GEN":
+                    logger.warning(f"  Tipo={doc_type} mas nome nao encontrado - usando SEM NOME")
+                    result.extracted_name = "SEM NOME"
+                    # Garantir que temos período para o arquivo
+                    if not result.extracted_period:
+                        result.extracted_period = "SEM DATA"
+                else:
+                    # Tipo não foi identificado (GEN) e nome também não
+                    logger.warning(f"  Tipo={doc_type} e nome nao encontrado - arquivo mantido sem alteracao")
+                    result.status = ProcessStatus.UNIDENTIFIED
+                    return result
 
             if not result.extracted_period and doc_type not in {"MBV"}:
                 logger.warning(f"  Tipo={doc_type} nome={result.extracted_name} mas periodo nao encontrado")
