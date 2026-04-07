@@ -9,6 +9,7 @@ Configuracao: edite config.ini (criado automaticamente na primeira execucao)
 
 import argparse
 import json
+import locale
 import os
 import re
 import unicodedata
@@ -39,6 +40,19 @@ except ImportError as e:
     print("Instale com: pip install pytesseract pdf2image Pillow opencv-python numpy tenacity")
     sys.exit(1)
 
+try:
+    pytesseract.pytesseract.DEFAULT_ENCODING = "latin-1"
+except Exception:
+    pass
+
+# RECOMENDAÇÃO 1: Import do monitor de confiança (opcional)
+try:
+    from monitor_confidence import ConfidenceMonitor, LOW_CONFIDENCE_THRESHOLD
+    CONFIDENCE_MONITOR_AVAILABLE = True
+except ImportError:
+    CONFIDENCE_MONITOR_AVAILABLE = False
+    LOW_CONFIDENCE_THRESHOLD = 80.0
+
 
 # =============================================================================
 # CONFIGURACAO
@@ -50,6 +64,11 @@ TESSDATA_DIR = PROJECT_ROOT / "tessdata"
 LOGS_DIR = PROJECT_ROOT / "logs"
 CONFIG_FILE = PROJECT_ROOT / "config.ini"
 DEFAULT_SCANNER_DIR = Path(r"G:\RH\EQUIPE RH\ARQUIVO\SCANNER")
+
+try:
+    os.environ.setdefault("TESSDATA_PREFIX", f"{TESSDATA_DIR.resolve().as_posix()}/")
+except Exception:
+    pass
 
 # OCR
 OCR_DPI = 300
@@ -404,7 +423,7 @@ POPPLER_CANDIDATES = [
 DOC_TYPE_SIGNATURES = {
     "FMM": {
         "required": [
-            r"[Ff]echamento\s+[Mm]ensal",
+            r"(?:[Ff]echamento\s+[Mm]ensal|[Rr]elat.?rio\s+de\s+[Rr]eembolso\s+de\s+[Dd]espesas\s+de\s+[Vv]iagens|[Ff]echamento\s*:\s*\d+)",
             r"[Mm]otorista",
         ],
         "optional": [
@@ -415,6 +434,36 @@ DOC_TYPE_SIGNATURES = {
             r"[Cc]ondutor",
             r"[Mm]otor[ri]s?ta",
             r"[Ff]rete",
+            r"[Rr]eembolso",
+            r"[Dd]espesas\s+de\s+[Vv]iagens",
+            r"[Aa]diantamentos?",
+        ],
+    },
+    "RELATORIO_ABASTECIMENTO": {
+        "required": [
+            r"[Aa]bastec(?:imento|imen|im|)\w*",
+            r"(?:\bKM\b|[Ll]itro|[Rr]\$|[Dd]estinos?)",
+        ],
+        "optional": [
+            r"[Rr]ondon[oó]polis",
+            r"[Pp]aranag[uú]a",
+            r"[Rr]io\s+[Vv]erde",
+            r"[Nn]ota\s*(?:fiscal|fatura)",
+            r"[Mm]otorista",
+            r"[Rr]elat.?rio",
+        ],
+    },
+    "SOLICITACAO_CONTRATACAO": {
+        "required": [
+            r"\bRE\s*:\s*MP\s*-\s*[Cc]ontrata",
+            r"[Aa]utorizad[oa]",
+        ],
+        "optional": [
+            r"[Cc]ontrata(?:r|[çc][ãa]o)",
+            r"[Rr]ecrutamento",
+            r"[Pp]ediu\s+demiss",
+            r"[Pp]restar\s+servi[çc]o",
+            r"[Oo]utlook",
         ],
     },
     "CP": {
@@ -630,13 +679,15 @@ DOC_TYPE_SIGNATURES = {
     },
     "DECLARACAO_RACIAL": {
         "required": [
-            r"[Dd]eclara[çc][ãa]o",
-            r"[Rr]acial",
+            r"[Dd]eclara.{0,4}o",
+            r"(?:[Rr]acial|[Ee]tnic[oa])",
         ],
         "optional": [
             r"[Aa]utodeclara[çc][ãa]o",
+            r"[Aa]utodeclara.{0,4}o",
             r"[Rr]a[çc][aa]",
             r"[Ee]tnic",
+            r"[Ee]tnic[oa]\s+[Rr]acial",
         ],
     },
     "NF": {
@@ -663,7 +714,7 @@ DOC_TYPE_SIGNATURES = {
     },
     "DECLARACAO": {
         "required": [
-            r"DECLARA.{0,2}[AÃ]O",
+            r"DECLARA.{0,4}O",
         ],
         "optional": [
             r"DECLARO",
@@ -703,7 +754,26 @@ DOC_TYPE_TITLE_HINTS = {
     "TREINAMENTO_DIRECAO_DEFENSIVA": ["TREINAMENTO DIRECAO DEFENSIVA", "TREINAMENTO DE DIRECAO DEFENSIVA"],
     "PAPELETA_CONTROLE_JORNADA": ["PAPELETA CONTROLE DE JORNADA", "PAPELETA CONTROLE JORNADA"],
     "QUESTIONARIO_ACOLHIMENTO": ["QUESTIONARIO DE ACOLHIMENTO", "QUESTIONARIO ACOLHIMENTO"],
-    "DECLARACAO_RACIAL": ["DECLARACAO RACIAL", "AUTODECLARACAO RACIAL"],
+    "DECLARACAO_RACIAL": [
+        "DECLARACAO RACIAL",
+        "AUTODECLARACAO RACIAL",
+        "AUTODECLARACAO ETNICO RACIAL",
+        "AUTODECLARAÇÃO ÉTNICO RACIAL",
+        "AUTODECLARA O ETNICO RACIAL",
+    ],
+    "DECLARACAO": [
+        "DECLARACAO DE ULTIMO DIA DE TRABALHADO",
+        "ULTIMO DIA DE TRABALHADO",
+        "DECLARAÇÃO DE ULTIMO DIA DE TRABALHADO",
+    ],
+    "RELATORIO_ABASTECIMENTO": [
+        "RELATORIO DE REEMBOLSO DE DESPESAS DE VIAGENS",
+        "ABASTECIMENTO",
+    ],
+    "SOLICITACAO_CONTRATACAO": [
+        "RE: MP - CONTRATACAO",
+        "MP - CONTRATACAO",
+    ],
 }
 
 DOC_TYPE_PRIORITY = {
@@ -730,6 +800,8 @@ DOC_TYPE_PRIORITY = {
     "AP": 75,
     "CONTRATO": 70,
     "DECLARACAO": 65,
+    "RELATORIO_ABASTECIMENTO": 64,
+    "SOLICITACAO_CONTRATACAO": 63,
     "RECIBO": 60,
     "COMPROVANTE": 55,
     "NF": 50,
@@ -841,6 +913,8 @@ OCR_CORRECTIONS = {
     "PAPELETA": "PAPELETA",
     "Racial": "Racial",
     "Papeleta": "Papeleta",
+    "AUTODECLARA O ETNICO RACIAL": "AUTODECLARAÇÃO ÉTNICO RACIAL",
+    "AUTODECLARACAO ETNICO RACIAL": "AUTODECLARAÇÃO ÉTNICO RACIAL",
 }
 
 
@@ -1198,6 +1272,17 @@ def configure_tesseract_command(tesseract_path: str) -> None:
         if _CONFIGURED_TESSERACT_CMD != tesseract_path:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
             _CONFIGURED_TESSERACT_CMD = tesseract_path
+
+
+def configure_tesseract_environment() -> None:
+    """Configura TESSDATA_PREFIX para a pasta tessdata do projeto.
+
+    Neste ambiente, o Tesseract resolve os idiomas diretamente a partir de
+    ``TESSDATA_PREFIX`` apontando para a pasta tessdata.
+    """
+    desired_prefix = f"{TESSDATA_DIR.resolve().as_posix()}/"
+    if os.environ.get("TESSDATA_PREFIX") != desired_prefix:
+        os.environ["TESSDATA_PREFIX"] = desired_prefix
 
 
 def find_poppler_path() -> str | None:
@@ -1613,6 +1698,7 @@ def ocr_image_with_confidence(
 ) -> tuple[str, float]:
     """Executa OCR e retorna texto + confianca media (0-100)."""
     configure_tesseract_command(tesseract_path)
+    configure_tesseract_environment()
 
     try:
         data = pytesseract.image_to_data(
@@ -1895,9 +1981,8 @@ def extract_mbv_data_from_rois(
 def build_ocr_config(psm: int = 6) -> str:
     """Constroi string de configuracao do Tesseract.
     Usa --oem 1 (LSTM only) para melhor qualidade.
-    Passa --tessdata-dir explicitamente para evitar problemas de encoding no Windows."""
-    tessdata_str = str(TESSDATA_DIR).replace("\\", "/")
-    return f'--oem 1 --psm {psm} --tessdata-dir "{tessdata_str}"'
+    Usa TESSDATA_PREFIX para localizar o tessdata de forma mais robusta no Windows."""
+    return f'--oem 1 --psm {psm}'
 
 
 def pdf_to_images(pdf_path: Path, poppler_path: str | None, dpi: int = 300) -> list:
@@ -1914,6 +1999,9 @@ def pdf_to_images(pdf_path: Path, poppler_path: str | None, dpi: int = 300) -> l
 
 def ocr_image(image: Image.Image, tesseract_path: str, config: str | None = None) -> str:
     """Executa OCR em uma imagem usando Tesseract. Com retry automático."""
+    configure_tesseract_command(tesseract_path)
+    configure_tesseract_environment()
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
     def _ocr():
         cfg = config if config is not None else build_ocr_config(psm=6)
@@ -3109,6 +3197,54 @@ def extract_comprovante_data(text: str) -> dict:
     return result
 
 
+def extract_relatorio_abastecimento_data(text: str) -> dict:
+    """Extrai dados de relatórios operacionais de abastecimento/reembolso."""
+    result: dict[str, str | None] = {"name": None, "period": None}
+
+    motorista_match = re.search(
+        r"[Mm]otorista\s*[:\-]?\s*(?:\d{3,6}\s+)?([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{5,})",
+        text,
+    )
+    if motorista_match:
+        candidate = clean_name(motorista_match.group(1))
+        if candidate:
+            result["name"] = candidate
+
+    if not result.get("name"):
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+
+    if not result.get("name"):
+        result["name"] = "ABASTECIMENTO"
+
+    range_match = re.search(r"(\d{2}/\d{2}/\d{1,4})\s*a\s*(\d{2}/\d{2}/\d{1,4})", text)
+    if range_match:
+        start = _correct_date_in_period(range_match.group(1).replace("/", "-"))
+        end = _correct_date_in_period(range_match.group(2).replace("/", "-"))
+        result["period"] = f"{start} a {end}"
+    else:
+        single_date = _extract_date_from_text(text)
+        if single_date:
+            result["period"] = single_date
+
+    return result
+
+
+def extract_solicitacao_contratacao_data(text: str) -> dict:
+    """Extrai dados de e-mails de solicitação/autorização de contratação."""
+    result = extract_fallback_data(text)
+    if not result.get("name"):
+        result["name"] = "SOLICITACAO CONTRATACAO"
+
+    if not result.get("period"):
+        date = _extract_date_from_text(text)
+        if date:
+            result["period"] = date
+
+    return result
+
+
 EXTRACTORS = {
     "FMM": extract_fmm_data,
     "CP": extract_cp_data,
@@ -3136,6 +3272,8 @@ EXTRACTORS = {
     "DECLARACAO": extract_declaracao_data,
     "CONTRATO": extract_contrato_data,
     "COMPROVANTE": extract_comprovante_data,
+    "RELATORIO_ABASTECIMENTO": extract_relatorio_abastecimento_data,
+    "SOLICITACAO_CONTRATACAO": extract_solicitacao_contratacao_data,
 }
 
 
@@ -3188,6 +3326,8 @@ DOC_TYPE_LABELS = {
     "DECLARACAO": "DECLARACAO",
     "CONTRATO": "CONTRATO",
     "COMPROVANTE": "COMPROVANTE",
+    "RELATORIO_ABASTECIMENTO": "RELATORIO ABASTECIMENTO",
+    "SOLICITACAO_CONTRATACAO": "SOLICITACAO CONTRATACAO",
     "GEN": "DOCUMENTO",
 }
 
@@ -3368,6 +3508,14 @@ def process_single_pdf(
     """Processa um unico PDF: OCR -> classificacao -> extracao -> renomeacao."""
     result = DocumentResult(original_path=pdf_path, status=ProcessStatus.ERROR)
     thresholds = confidence_thresholds or {}
+    
+    # RECOMENDAÇÃO 1: Inicializar monitor (se disponível)
+    confidence_monitor = None
+    if CONFIDENCE_MONITOR_AVAILABLE:
+        try:
+            confidence_monitor = ConfidenceMonitor()
+        except Exception:
+            pass
 
     try:
         # Validacao de integridade antes de OCR
@@ -3391,6 +3539,21 @@ def process_single_pdf(
         result.doc_type = doc_type
         result.confidence_score = get_classification_confidence(full_text, doc_type)
         logger.info(f"  Confidence: {result.confidence_score:.1f}%")
+        
+        # RECOMENDAÇÃO 1: Registrar classificações com confiança baixa (< 80%)
+        if confidence_monitor and result.confidence_score < LOW_CONFIDENCE_THRESHOLD:
+            try:
+                confidence_monitor.log_low_confidence(
+                    filename=pdf_path.name,
+                    doc_type=doc_type,
+                    confidence_score=result.confidence_score,
+                    extracted_name=None,  # Será preenchido depois
+                    extracted_period=None,  # Será preenchido depois
+                    ocr_preview=full_text,
+                    logger=logger,
+                )
+            except Exception as e:
+                logger.debug(f"Erro ao registrar Low-Confidence: {e}")
 
         if doc_type is None:
             logger.warning("  Tipo nao identificado - tentando fallback extraction generico")

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -24,17 +25,15 @@ from main import (
     DOC_TYPE_SIGNATURES,
     DOC_TYPE_TITLE_HINTS,
     classify_document,
+    configure_tesseract_command,
     find_tesseract_path,
     find_poppler_path,
-    configure_tesseract_command,
-    pdf_to_images,
-    preprocess_image,
-    ocr_image,
-    build_ocr_config,
+    extract_text_from_pdf_adaptive,
     normalize_ocr_text,
     load_config,
     setup_logging,
     CUSTOM_MODELS_FILE,
+    TESSDATA_DIR,
     _text_has_title_hint,
 )
 
@@ -65,6 +64,8 @@ STANDARD_DOC_TYPES = {
     "DECLARACAO",
     "CONTRATO",
     "COMPROVANTE",
+    "RELATORIO_ABASTECIMENTO",
+    "SOLICITACAO_CONTRATACAO",
     "GEN",
 }
 
@@ -87,6 +88,8 @@ CONTENT_TYPE_HINTS = {
     "PAPELETA_CONTROLE_JORNADA": [r"PAPELETA\s+CONTROLE\s+DE\s+JORNADA", r"CONTROLE\s+DE\s+JORNADA", r"JORNADA"],
     "QUESTIONARIO_ACOLHIMENTO": [r"QUESTIONARIO\s+DE\s+ACOLHIMENTO", r"ACOLHIMENTO", r"QUESTIONARIO"],
     "DECLARACAO_RACIAL": [r"DECLARACAO\s+RACIAL", r"AUTODECLARACAO\s+RACIAL", r"DECLARACAO"],
+    "RELATORIO_ABASTECIMENTO": [r"ABASTEC", r"LITRO|\bKM\b", r"DESTINOS?|REEMBOLSO|DESPESAS\s+DE\s+VIAGENS"],
+    "SOLICITACAO_CONTRATACAO": [r"RE\s*:\s*MP\s*-\s*CONTRATA", r"AUTORIZAD", r"RECRUTAMENTO|CONTRATAR"],
 }
 
 TITLE_HINT_WORDS = {
@@ -139,15 +142,20 @@ def collect_recursive_pdfs(base_dir: Path) -> list[Path]:
     )
 
 
-def fast_ocr_for_training(pdf_path: Path, tesseract_path: str, poppler_path: str | None) -> str:
-    """OCR rapido para treino: primeira pagina, DPI 300, PSM 6."""
-    images = pdf_to_images(pdf_path, poppler_path, dpi=300)
-    if not images:
-        return ""
-    first_page = preprocess_image(images[0])
-    config = build_ocr_config(psm=6)
-    text = ocr_image(first_page, tesseract_path, config=config)
-    return normalize_ocr_text(text)
+def fast_ocr_for_training(
+    pdf_path: Path,
+    tesseract_path: str,
+    poppler_path: str | None,
+    logger,
+) -> str:
+    """OCR para treino usando a mesma rota adaptativa do processamento principal."""
+    normalized_text, _ = extract_text_from_pdf_adaptive(
+        pdf_path.resolve(),
+        tesseract_path,
+        poppler_path,
+        logger,
+    )
+    return normalize_ocr_text(normalized_text)
 
 
 def extract_keywords(texts: Iterable[str]) -> Counter:
@@ -275,6 +283,7 @@ def train_recursive(input_dir: Path, apply_changes: bool) -> dict:
     tesseract_path = find_tesseract_path()
     poppler_path = find_poppler_path()
     configure_tesseract_command(tesseract_path)
+    os.environ["TESSDATA_PREFIX"] = f"{TESSDATA_DIR.resolve().as_posix()}/"
 
     pdf_files = collect_recursive_pdfs(input_dir)
     logger.info(f"Treino recursivo: {len(pdf_files)} PDFs encontrados em {input_dir}")
@@ -295,7 +304,7 @@ def train_recursive(input_dir: Path, apply_changes: bool) -> dict:
 
     for pdf_path in pdf_files:
         try:
-            normalized = fast_ocr_for_training(pdf_path, tesseract_path, poppler_path)
+            normalized = fast_ocr_for_training(pdf_path, tesseract_path, poppler_path, logger)
             candidate_type = discover_candidate_doc_type(normalized)
             if candidate_type:
                 texts_by_expected_type[candidate_type].append(normalized)
