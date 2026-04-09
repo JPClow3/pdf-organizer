@@ -41,6 +41,12 @@ except ImportError as e:
     sys.exit(1)
 
 try:
+    from pypdf import PdfReader, PdfWriter
+except ImportError:
+    PdfReader = None
+    PdfWriter = None
+
+try:
     pytesseract.pytesseract.DEFAULT_ENCODING = "latin-1"
 except Exception:
     pass
@@ -49,9 +55,11 @@ except Exception:
 try:
     from monitor_confidence import ConfidenceMonitor, LOW_CONFIDENCE_THRESHOLD
     CONFIDENCE_MONITOR_AVAILABLE = True
+    CONFIDENCE_MONITOR_IMPORT_ERROR = None
 except ImportError:
     CONFIDENCE_MONITOR_AVAILABLE = False
     LOW_CONFIDENCE_THRESHOLD = 80.0
+    CONFIDENCE_MONITOR_IMPORT_ERROR = "monitor_confidence.py nao encontrado; telemetria de baixa confianca desabilitada."
 
 
 # =============================================================================
@@ -93,6 +101,8 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
+        import sys
+        print(f"[OCR.CONFIG][WARN] Invalid integer for {name}={raw!r}; using default={default}", file=sys.stderr)
         return default
 
 
@@ -103,6 +113,8 @@ def _env_float(name: str, default: float) -> float:
     try:
         return float(raw)
     except ValueError:
+        import sys
+        print(f"[OCR.CONFIG][WARN] Invalid float for {name}={raw!r}; using default={default}", file=sys.stderr)
         return default
 
 
@@ -119,17 +131,64 @@ def _env_tuple_int(name: str, default: tuple[int, int]) -> tuple[int, int]:
         return default
 
 
-OCR_DPI = _env_int("OCR_TUNE_DPI", OCR_DPI)
-OCR_DPI_HIRES = _env_int("OCR_TUNE_DPI_HIRES", OCR_DPI_HIRES)
-UPSCALE_MIN_WIDTH = _env_int("OCR_TUNE_MIN_WIDTH", UPSCALE_MIN_WIDTH)
-PREPROCESS_ADAPTIVE_BLOCK_SIZE = _env_int("OCR_TUNE_BLOCK_SIZE", PREPROCESS_ADAPTIVE_BLOCK_SIZE)
-PREPROCESS_ADAPTIVE_C = _env_int("OCR_TUNE_ADAPTIVE_C", PREPROCESS_ADAPTIVE_C)
-PREPROCESS_MEDIAN_BLUR = _env_int("OCR_TUNE_MEDIAN", PREPROCESS_MEDIAN_BLUR)
-CLAHE_CLIP_LIMIT = _env_float("OCR_TUNE_CLAHE_CLIP", CLAHE_CLIP_LIMIT)
-CLAHE_TILE_GRID = _env_tuple_int("OCR_TUNE_CLAHE_GRID", CLAHE_TILE_GRID)
-TITLE_HINT_MIN_RATIO = _env_float("OCR_TUNE_TITLE_HINT_RATIO", TITLE_HINT_MIN_RATIO)
+# Logging wrapper for environment variable loading
+_LOADED_ENV_VARS: dict[str, int | float] = {}
 
-# Garantias para parâmetros sensíveis do OpenCV
+
+def _env_int_with_logging(name: str, default: int) -> int:
+    value = _env_int(name, default)
+    if os.getenv(name) is not None:
+        _LOADED_ENV_VARS[name] = value
+    return value
+
+
+def _env_float_with_logging(name: str, default: float) -> float:
+    value = _env_float(name, default)
+    if os.getenv(name) is not None:
+        _LOADED_ENV_VARS[name] = value
+    return value
+
+
+OCR_DPI = _env_int_with_logging("OCR_TUNE_DPI", OCR_DPI)
+OCR_DPI_HIRES = _env_int_with_logging("OCR_TUNE_DPI_HIRES", OCR_DPI_HIRES)
+UPSCALE_MIN_WIDTH = _env_int_with_logging("OCR_TUNE_MIN_WIDTH", UPSCALE_MIN_WIDTH)
+PREPROCESS_ADAPTIVE_BLOCK_SIZE = _env_int_with_logging("OCR_TUNE_BLOCK_SIZE", PREPROCESS_ADAPTIVE_BLOCK_SIZE)
+PREPROCESS_ADAPTIVE_C = _env_int_with_logging("OCR_TUNE_ADAPTIVE_C", PREPROCESS_ADAPTIVE_C)
+PREPROCESS_MEDIAN_BLUR = _env_int_with_logging("OCR_TUNE_MEDIAN", PREPROCESS_MEDIAN_BLUR)
+CLAHE_CLIP_LIMIT = _env_float_with_logging("OCR_TUNE_CLAHE_CLIP", CLAHE_CLIP_LIMIT)
+CLAHE_TILE_GRID = _env_tuple_int("OCR_TUNE_CLAHE_GRID", CLAHE_TILE_GRID)
+TITLE_HINT_MIN_RATIO = _env_float_with_logging("OCR_TUNE_TITLE_HINT_RATIO", TITLE_HINT_MIN_RATIO)
+
+# Validacao de bounds para parametros criticos de DPI
+if OCR_DPI < 100:
+    OCR_DPI = 100
+if OCR_DPI > 600:
+    OCR_DPI = 600
+
+if OCR_DPI_HIRES < 150:
+    OCR_DPI_HIRES = 150
+if OCR_DPI_HIRES > 600:
+    OCR_DPI_HIRES = 600
+
+# Validacao de bounds para upscaling
+if UPSCALE_MIN_WIDTH < 500:
+    UPSCALE_MIN_WIDTH = 500
+if UPSCALE_MIN_WIDTH > 10000:
+    UPSCALE_MIN_WIDTH = 10000
+
+# Validacao de bounds para CLAHE
+if CLAHE_CLIP_LIMIT < 1.0:
+    CLAHE_CLIP_LIMIT = 1.0
+if CLAHE_CLIP_LIMIT > 4.0:
+    CLAHE_CLIP_LIMIT = 4.0
+
+# Validacao de bounds para adaptive thresholding
+if PREPROCESS_ADAPTIVE_C < 0:
+    PREPROCESS_ADAPTIVE_C = 0
+if PREPROCESS_ADAPTIVE_C > 100:
+    PREPROCESS_ADAPTIVE_C = 100
+
+# Garantias para parâmetros sensíveis do OpenCV (kernel sizes)
 if PREPROCESS_ADAPTIVE_BLOCK_SIZE < 3:
     PREPROCESS_ADAPTIVE_BLOCK_SIZE = 3
 if PREPROCESS_ADAPTIVE_BLOCK_SIZE % 2 == 0:
@@ -144,6 +203,11 @@ if TITLE_HINT_MIN_RATIO < 0.5:
     TITLE_HINT_MIN_RATIO = 0.5
 if TITLE_HINT_MIN_RATIO > 0.99:
     TITLE_HINT_MIN_RATIO = 0.99
+
+# Log das variaveis de ambiente carregadas (para debug de tuning)
+if _LOADED_ENV_VARS:
+    import sys
+    print(f"[OCR.CONFIG] Loaded tuning parameters from environment: {_LOADED_ENV_VARS}", file=sys.stderr)
 
 DEFAULT_WATCH_INTERVAL_SECONDS = 15
 DEFAULT_FILE_STABILITY_SECONDS = 5.0
@@ -163,6 +227,7 @@ MBV_TEMPLATE_FILES = {
     1: "mbv_page2_blank.png",
     2: "mbv_page3_blank.png",
 }
+_MBV_TEMPLATE_WARNING_EMITTED = False
 
 # ROIs normalizados (x, y, w, h) em proporcao da pagina
 MBV_FIELD_ROIS = {
@@ -289,6 +354,22 @@ COMMON_BLOCKED_NAME_TERMS = {
     "PERÍODO",
     "REFERENCIA",
     "REFERÊNCIA",
+    "DECLARACAO",
+    "DECLARAÇÃO",
+    "RECIBO",
+    "COMPROVANTE",
+    "CONTRATO",
+    "NOTA FISCAL",
+    "DANFE",
+    "DEVIDOS FINS",
+    "OS DEVIDOS FINS",
+    "PARA OS DEVIDOS FINS",
+    "ATESTADO",
+    "SOLICITACAO",
+    "SOLICITAÇÃO",
+    "ABERTURA DE VAGA",
+    "CANDIDATO",
+    "PACIENTE",
 }
 
 DOC_BLOCKED_NAME_TERMS = {
@@ -368,6 +449,17 @@ DOC_BLOCKED_NAME_TERMS = {
         "MÉDICO",
         "PACIENTE",
         "AFASTAMENTO",
+        "RESPONSAVEL",
+        "RESPONSÁVEL",
+        "RESPONS",
+        "OU RESPONS",
+        "OU RESPONSAVEL",
+        "OU RESPONSÁVEL",
+        "OU RESPONSÃ",
+        "DEVIDOS",
+        "FINS",
+        "OS DEVIDOS FINS",
+        "PARA OS DEVIDOS FINS",
     },
     "CTPS": {
         "CTPS",
@@ -435,6 +527,21 @@ DOC_BLOCKED_NAME_TERMS = {
         "SEGURANCA",
         "SEGURANÇA",
     },
+    "TREINAMENTO": {
+        "TREINAMENTO",
+        "PARTICIPANTE",
+        "INSTRUTOR",
+        "CARGA HORARIA",
+        "CARGA HORÁRIA",
+        "CENTRAL",
+        "REGISTRO",
+        "LISTA",
+        "PRESENCA",
+        "PRESENÇA",
+        "APONTAMENTOS",
+        "QUE DEVE",
+        "DEVE FAZER",
+    },
     "PAPELETA_CONTROLE_JORNADA": {
         "PAPELETA",
         "CONTROLE",
@@ -442,6 +549,14 @@ DOC_BLOCKED_NAME_TERMS = {
         "PONTO",
         "HORARIO",
         "HORÁRIO",
+    },
+    "PAPELETA": {
+        "PAPELETA",
+        "JORNADA",
+        "HORARIO",
+        "HORÁRIO",
+        "INTERVALO",
+        "REPOUSO",
     },
     "QUESTIONARIO_ACOLHIMENTO": {
         "QUESTIONARIO",
@@ -457,6 +572,102 @@ DOC_BLOCKED_NAME_TERMS = {
         "RAÇA",
         "AUTODECLARACAO",
         "AUTODECLARAÇÃO",
+    },
+    "NF": {
+        "NOTA",
+        "FISCAL",
+        "DANFE",
+        "CHAVE",
+        "ACESSO",
+        "EMITENTE",
+        "DESTINATARIO",
+        "DESTINATÁRIO",
+        "DOCUMENTO AUXILIAR",
+        "VALOR TOTAL",
+    },
+    "RECIBO": {
+        "RECIBO",
+        "RECEBI",
+        "RECEBEMOS",
+        "VALOR",
+        "R$",
+        "REFERENCIA",
+        "REFERÊNCIA",
+        "IMPORTANCIA",
+        "IMPORTÂNCIA",
+    },
+    "DECLARACAO": {
+        "DECLARACAO",
+        "DECLARAÇÃO",
+        "DECLARO",
+        "ATESTO",
+        "DEVIDOS FINS",
+        "ASSINATURA",
+        "CPF",
+        "RG",
+    },
+    "CONTRATO": {
+        "CONTRATO",
+        "CONTRATANTE",
+        "CONTRATADO",
+        "CLAUSULA",
+        "CLÁUSULA",
+        "VIGENCIA",
+        "VIGÊNCIA",
+    },
+    "COMPROVANTE": {
+        "COMPROVANTE",
+        "PAGAMENTO",
+        "TRANSFERENCIA",
+        "TRANSFERÊNCIA",
+        "PROTOCOLO",
+        "AUTENTICACAO",
+        "AUTENTICAÇÃO",
+        "BANCO",
+    },
+    "RELATORIO_ABASTECIMENTO": {
+        "ABASTECIMENTO",
+        "RELATORIO",
+        "RELATÓRIO",
+        "DESTINOS",
+        "MOTORISTA",
+        "LITRO",
+        "KM",
+    },
+    "ABERTURA_VAGA": {
+        "ABERTURA",
+        "VAGA",
+        "CARGO",
+        "REQUISITOS",
+        "REQUISITO",
+        "SELECAO",
+        "SELEÇÃO",
+        "RECRUTAMENTO",
+        "DESCRICAO",
+        "DESCRIÇÃO",
+    },
+    "DUT_DECLARACAO": {
+        "required": [
+            r"\bDUT\b",
+            r"DECLARA.{0,4}O",
+        ],
+        "optional": [
+            r"PROPRIET[ÁA]RIO",
+            r"COMPRADOR",
+            r"VENDEDOR",
+        ],
+    },
+    "POLITICA_VIOLACOES_VELOCIDADE": {
+        "required": [
+            r"POL[ÍI]TICA",
+            r"VIOLA.{0,4}ES",
+            r"VELOCIDADE",
+        ],
+        "optional": [
+            r"CONDUTOR",
+            r"MOTORISTA",
+            r"TRANSPORTADORA",
+        ],
     },
     "MBV": MBV_BLOCKED_NAME_TERMS,
 }
@@ -534,6 +745,18 @@ DOC_TYPE_SIGNATURES = {
             r"[Pp]ediu\s+demiss",
             r"[Pp]restar\s+servi[çc]o",
             r"[Oo]utlook",
+        ],
+    },
+    "ABERTURA_VAGA": {
+        "required": [
+            r"[Aa]bertura\s+de\s+[Vv]aga",
+            r"(?:[Cc]argo|[Vv]aga|[Pp]osi[çc][ãa]o)",
+        ],
+        "optional": [
+            r"[Cc]andidato",
+            r"[Rr]equisi(?:tos|to)",
+            r"[Rr]ecrutamento",
+            r"[Ss]ele[çc][ãa]o",
         ],
     },
     "CP": {
@@ -771,48 +994,70 @@ DOC_TYPE_SIGNATURES = {
             r"[Ee]tnic[oa]\s+[Rr]acial",
         ],
     },
+    "ALTERACAO_BENEFICIARIOS": {
+        "required": [
+            r"ICATU",
+            r"BENEFICI[ÁA]RI",
+            r"(?:ALTERA[ÇC][ÃA]O|INDICA[ÇC][ÃA]O)",
+        ],
+        "optional": [
+            r"SEGUROS",
+            r"ALTERA[ÇC][ÃA]O/INDICA[ÇC][ÃA]O",
+            r"DADOS\s+PESSOAIS",
+            r"PLANO",
+        ],
+    },
     "NF": {
         "required": [
             r"NOTA\s+[FP]IS?CAL",
+            r"(?:DANFE|CHAVE\s+DE\s+ACESSO|DOCUMENTO\s+AUXILIAR)",
         ],
         "optional": [
             r"ELETR.?NICA",
             r"CHAVE\s+DE\s+ACESSO",
             r"DOCUMENTO\s+AUXILIAR",
             r"DANFE",
+            r"NCM",
+            r"CFOP",
         ],
     },
     "RECIBO": {
         "required": [
             r"RECIBO",
+            r"(?:RECEB[EI]M?OS?|VALOR|R\$)",
         ],
         "optional": [
             r"RECEB[EI]",
             r"VALOR",
             r"R\$",
             r"REFER[ÊE]NCIA",
+            r"ASSINATURA",
         ],
     },
     "DECLARACAO": {
         "required": [
             r"DECLARA.{0,4}O",
+            r"(?:DECLARO|ATESTO|PARA\s+OS\s+DEVIDOS\s+FINS)",
         ],
         "optional": [
             r"DECLARO",
             r"ATESTO",
             r"PARA\s+OS\s+DEVIDOS\s+FINS",
             r"CPF",
+            r"ASSINATURA",
         ],
     },
     "CONTRATO": {
         "required": [
             r"CONTRATO",
+            r"(?:CONTRATANTE|CONTRATADO|CL[ÁA]USULA|VIG[ÊE]NCIA)",
         ],
         "optional": [
             r"CONTRATANTE",
             r"CONTRATADO",
             r"CL[ÁA]USULA",
             r"VIG[ÊE]NCIA",
+            r"OBJETO",
         ],
     },
     "COMPROVANTE": {
@@ -824,6 +1069,7 @@ DOC_TYPE_SIGNATURES = {
             r"TRANSFER[ÊE]NCIA",
             r"PROTOCOLO",
             r"AUTENTICA[ÇC][ÃA]O",
+            r"BANCO",
         ],
     },
 }
@@ -835,6 +1081,7 @@ DOC_TYPE_TITLE_HINTS = {
     "TREINAMENTO_DIRECAO_DEFENSIVA": ["TREINAMENTO DIRECAO DEFENSIVA", "TREINAMENTO DE DIRECAO DEFENSIVA"],
     "PAPELETA_CONTROLE_JORNADA": ["PAPELETA CONTROLE DE JORNADA", "PAPELETA CONTROLE JORNADA"],
     "QUESTIONARIO_ACOLHIMENTO": ["QUESTIONARIO DE ACOLHIMENTO", "QUESTIONARIO ACOLHIMENTO"],
+    "ADVERTENCIA_ESCRITA": ["ADVERTENCIA ESCRITA", "ADVERTENCIA DISCIPLINAR"],
     "DECLARACAO_RACIAL": [
         "DECLARACAO RACIAL",
         "AUTODECLARACAO RACIAL",
@@ -854,6 +1101,21 @@ DOC_TYPE_TITLE_HINTS = {
     "SOLICITACAO_CONTRATACAO": [
         "RE: MP - CONTRATACAO",
         "MP - CONTRATACAO",
+    ],
+    "ABERTURA_VAGA": [
+        "ABERTURA DE VAGA",
+        "REQUISICAO DE VAGA",
+    ],
+    "DUT_DECLARACAO": [
+        "DUT DECLARACAO",
+    ],
+    "POLITICA_VIOLACOES_VELOCIDADE": [
+        "POLITICA DE VIOLACOES VELOCIDADE",
+        "POLITICA VIOLACOES VELOCIDADE",
+    ],
+    "ALTERACAO_BENEFICIARIOS": [
+        "ICATU SEGUROS ALTERACAO INDICACAO DE BENEFICIARIOS",
+        "ALTERACAO INDICACAO DE BENEFICIARIOS",
     ],
 }
 
@@ -879,11 +1141,15 @@ DOC_TYPE_PRIORITY = {
     "TESTE_PRATICO": 72,
     "PAPELETA_CONTROLE_JORNADA": 71,
     "QUESTIONARIO_ACOLHIMENTO": 70,
-    "DECLARACAO_RACIAL": 69,
+    "DECLARACAO_RACIAL": 76,
+    "ALTERACAO_BENEFICIARIOS": 75,
+    "DUT_DECLARACAO": 74,
+    "POLITICA_VIOLACOES_VELOCIDADE": 73,
     "CONTRATO": 70,
     "DECLARACAO": 65,
     "RELATORIO_ABASTECIMENTO": 64,
     "SOLICITACAO_CONTRATACAO": 63,
+    "ABERTURA_VAGA": 62,
     "RECIBO": 60,
     "COMPROVANTE": 55,
     "NF": 50,
@@ -997,6 +1263,14 @@ OCR_CORRECTIONS = {
     "Papeleta": "Papeleta",
     "AUTODECLARA O ETNICO RACIAL": "AUTODECLARAÇÃO ÉTNICO RACIAL",
     "AUTODECLARACAO ETNICO RACIAL": "AUTODECLARAÇÃO ÉTNICO RACIAL",
+    "RESPONSÃ": "RESPONSÁVEL",
+    "RESPONSAVEL": "RESPONSÁVEL",
+    "DECLARAÇAO": "DECLARAÇÃO",
+    "DECLARACAO DE": "DECLARAÇÃO DE",
+    "COMPETENCIA": "COMPETÊNCIA",
+    "REFERENCIA": "REFERÊNCIA",
+    "EMISSAO": "EMISSÃO",
+    "AUTENTICACAO": "AUTENTICAÇÃO",
 }
 
 
@@ -1513,6 +1787,59 @@ def setup_logging(log_dir: Path | str | None = LOGS_DIR) -> logging.Logger:
 # CORRECAO DE ANO
 # =============================================================================
 
+MONTH_NAME_MAP = {
+    "JAN": "01", "JANEIRO": "01",
+    "FEV": "02", "FEVEREIRO": "02",
+    "MAR": "03", "MARCO": "03", "MARÇO": "03",
+    "ABR": "04", "ABRIL": "04",
+    "MAI": "05", "MAIO": "05",
+    "JUN": "06", "JUNHO": "06",
+    "JUL": "07", "JULHO": "07",
+    "AGO": "08", "AGOSTO": "08",
+    "SET": "09", "SETEMBRO": "09",
+    "OUT": "10", "OUTUBRO": "10",
+    "NOV": "11", "NOVEMBRO": "11",
+    "DEZ": "12", "DEZEMBRO": "12",
+}
+
+
+def _ocr_digits(value: str) -> str:
+    """Converte confusões comuns de OCR em dígitos (ex.: O->0, I->1)."""
+    table = str.maketrans({
+        "O": "0", "o": "0", "Q": "0", "D": "0",
+        "I": "1", "l": "1", "|": "1",
+        "S": "5", "s": "5",
+        "B": "8",
+        "Z": "2", "z": "2",
+        "G": "6", "g": "6",
+    })
+    return re.sub(r"\D", "", value.translate(table))
+
+
+def _normalize_date_parts(day: str, month: str, year: str) -> str | None:
+    """Normaliza e valida dia/mes/ano para DD-MM-YYYY."""
+    d_raw = _ocr_digits(day)
+    m_raw = _ocr_digits(month)
+    y_raw = _ocr_digits(year)
+
+    if not d_raw or not m_raw or not y_raw:
+        return None
+
+    d = int(d_raw)
+    m = int(m_raw)
+    if not (1 <= d <= 31 and 1 <= m <= 12):
+        return None
+
+    yyyy = correct_year(y_raw)
+    return f"{d:02d}-{m:02d}-{yyyy}"
+
+
+def _month_name_to_number(token: str) -> str | None:
+    normalized = unicodedata.normalize("NFKD", token)
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = re.sub(r"[^A-Za-z]", "", normalized).upper()
+    return MONTH_NAME_MAP.get(normalized)
+
 
 def correct_year(raw_year: str) -> str:
     """Corrige valores de ano com erros de OCR para anos razoaveis.
@@ -1534,8 +1861,8 @@ def correct_year(raw_year: str) -> str:
     except ValueError:
         return str(current_year)
 
-    # Faixa razoavel: 2020 ate ano_corrente + 2
-    min_year = 2020
+    # Faixa razoavel: preserva anos historicos reais e permite correcoes em anos futuros/fora da faixa.
+    min_year = 1900
     max_year = current_year + 2
 
     if min_year <= year_int <= max_year:
@@ -1560,7 +1887,11 @@ def correct_year(raw_year: str) -> str:
             best = min(candidates, key=lambda c: abs(c - current_year))
             return str(best)
 
-    # Nenhuma correcao possivel -- usar ano corrente
+    # Nenhuma correcao possivel -- preservar o valor original quando ele ja parece ser um ano de 4 digitos.
+    if len(year_str) == 4 and 1900 <= year_int <= 2100:
+        return year_str
+
+    # Ultimo recurso para valores truncados ou inconsistentes.
     return str(current_year)
 
 
@@ -1641,6 +1972,34 @@ def preprocess_image_for_tables(pil_image: Image.Image) -> Image.Image:
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return Image.fromarray(binary)
 
+def preprocess_image_enhanced(pil_image: Image.Image) -> Image.Image:
+    """Preprocessamento mais forte para documentos de baixa legibilidade.
+
+    Aplica equalizacao local, suavizacao leve e limpeza morfologica para
+    reforcar traços fracos sem destruir textos pequenos.
+    """
+    gray = _to_gray(pil_image)
+    gray = _upscale_if_small(gray)
+    gray = deskew_image(gray)
+    gray = _apply_clahe(gray)
+
+    # Reduz ruido sem borrar excessivamente bordas de letra.
+    gray = cv2.bilateralFilter(gray, 7, 45, 45)
+
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, PREPROCESS_ADAPTIVE_BLOCK_SIZE, PREPROCESS_ADAPTIVE_C,
+    )
+
+    # Cleanup morfologico leve: remove pontos isolados e fecha pequenas falhas.
+    kernel = np.ones((2, 2), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    if PREPROCESS_MEDIAN_BLUR > 1:
+        binary = cv2.medianBlur(binary, PREPROCESS_MEDIAN_BLUR)
+
+    return Image.fromarray(binary)
 
 def preprocess_image_light(pil_image: Image.Image) -> Image.Image:
     """Preprocessamento leve para documentos manuscritos.
@@ -1680,6 +2039,24 @@ def _resolve_mbv_template_path(page_index: int) -> Path | None:
         return None
     candidate = MBV_TEMPLATE_DIR / filename
     return candidate if candidate.is_file() else None
+
+
+def log_optional_runtime_warnings(logger: logging.Logger) -> None:
+    """Registra dependencias opcionais ausentes e modos degradados."""
+    if not CONFIDENCE_MONITOR_AVAILABLE and CONFIDENCE_MONITOR_IMPORT_ERROR:
+        logger.warning(CONFIDENCE_MONITOR_IMPORT_ERROR)
+
+    missing_templates = [
+        filename
+        for filename in MBV_TEMPLATE_FILES.values()
+        if not (MBV_TEMPLATE_DIR / filename).is_file()
+    ]
+    if missing_templates:
+        logger.warning(
+            "Templates MBV ausentes em %s; extracao MBV seguira em modo degradado (ROI sem template). Faltando: %s",
+            MBV_TEMPLATE_DIR,
+            ", ".join(missing_templates),
+        )
 
 
 def _align_to_template(page_gray: np.ndarray, template_gray: np.ndarray) -> np.ndarray:
@@ -1824,12 +2201,89 @@ def ocr_image_with_confidence(
 
 
 def _extract_date_from_text(text: str) -> str | None:
-    """Extrai a primeira data DD/MM/AAAA e normaliza para DD-MM-AAAA."""
-    match = re.search(r"(\d{2})/(\d{2})/(\d{1,4})", text)
+    """Extrai data em múltiplos formatos e normaliza para DD-MM-YYYY."""
+    # Formatos numéricos: DD/MM/YYYY e DD-MM-YYYY (inclui 1 dígito)
+    for match in re.finditer(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{1,4})\b", text):
+        normalized = _normalize_date_parts(match.group(1), match.group(2), match.group(3))
+        if normalized:
+            return normalized
+
+    # Formato textual: DD de MÊS de YYYY
+    textual = re.search(
+        r"\b(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç]+)\s+de\s+(\d{2,4})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if textual:
+        month_num = _month_name_to_number(textual.group(2))
+        if month_num:
+            normalized = _normalize_date_parts(textual.group(1), month_num, textual.group(3))
+            if normalized:
+                return normalized
+
+    # Competência textual: mês conhecido/YYYY => MM-YYYY
+    month_year_textual = re.search(
+        r"\b((?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)[A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç]*)\s*/\s*(\d{2,4})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if month_year_textual:
+        month_num = _month_name_to_number(month_year_textual.group(1))
+        if month_num:
+            yyyy = correct_year(_ocr_digits(month_year_textual.group(2)) or month_year_textual.group(2))
+            return f"{month_num}-{yyyy}"
+
+    # Competência numérica: MM/YYYY => MM-YYYY
+    month_year_num = re.search(r"\b(\d{1,2})[/-](\d{2,4})(?![/-]\d)\b", text)
+    if month_year_num:
+        m = _ocr_digits(month_year_num.group(1))
+        y = _ocr_digits(month_year_num.group(2))
+        if m and y:
+            month_int = int(m)
+            if 1 <= month_int <= 12:
+                return f"{month_int:02d}-{correct_year(y)}"
+
+    return None
+
+
+RECENT_OPERATIONAL_DOC_TYPES = {
+    "ADVERTENCIA_ESCRITA",
+    "AVALIACAO_MOTORISTA",
+    "TESTE_PRATICO",
+    "TESTE_CONHECIMENTOS_GERAIS",
+    "TREINAMENTO_DIRECAO_DEFENSIVA",
+    "TREINAMENTO",
+    "PAPELETA_CONTROLE_JORNADA",
+    "PAPELETA",
+    "QUESTIONARIO_ACOLHIMENTO",
+    "POLITICA_VIOLACOES_VELOCIDADE",
+}
+
+
+def _is_suspicious_period(period: str | None, doc_type: str | None, confidence_score: float = 100.0) -> bool:
+    """Identifica datas provavelmente falsas em OCR de baixa qualidade."""
+    if not period or period in {"SEM DATA", "SEM PERIODO"}:
+        return False
+
+    match = re.fullmatch(r"(\d{2})-(\d{2})-(\d{4})", period.strip())
     if not match:
-        return None
-    day, month, year = match.group(1), match.group(2), correct_year(match.group(3))
-    return f"{day}-{month}-{year}"
+        return False
+
+    day = int(match.group(1))
+    month = int(match.group(2))
+    year = int(match.group(3))
+    current_year = datetime.now().year
+
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return True
+
+    if year > current_year + 1:
+        return True
+
+    if doc_type in RECENT_OPERATIONAL_DOC_TYPES and confidence_score < 60.0 and year < current_year - 5:
+        return True
+
+    return False
 
 
 def _extract_cpf_from_text(text: str) -> str | None:
@@ -1861,6 +2315,116 @@ def _extract_name_from_text_patterns(text: str) -> str | None:
     return None
 
 
+def _extract_name_from_labeled_lines(text: str, doc_type: str) -> str | None:
+    """Extrai nome a partir de rótulos comuns em linha atual/próxima linha.
+
+    Exemplos cobertos:
+    - "Empregado: JOAO DA SILVA"
+    - "Assinatura do empregado:\nJOAO DA SILVA"
+    - "Nome completo - JOAO DA SILVA"
+    """
+    label_pattern = re.compile(
+        r"(?i)\b(?:nome(?:\s+completo)?|empregado(?:\(a\))?|colaborador(?:\(a\))?|"
+        r"funcion[áa]rio(?:\(a\))?|candidato(?:\(a\))?|paciente|titular|"
+        r"assinatura\s+do\s+(?:empregado|colaborador|funcion[áa]rio|candidato|paciente|titular))\b"
+    )
+
+    lines = text.splitlines()
+    for idx, raw_line in enumerate(lines):
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+
+        match = label_pattern.search(line)
+        if not match:
+            continue
+
+        tail = line[match.end():]
+        tail = re.sub(r"^[\s:\-–—.]+", "", tail).strip()
+
+        candidate = tail
+        if not candidate:
+            for j in range(idx + 1, min(idx + 4, len(lines))):
+                next_line = re.sub(r"\s+", " ", lines[j]).strip()
+                if next_line:
+                    candidate = next_line
+                    break
+
+        if not candidate:
+            continue
+
+        candidate = re.sub(r"\s*(CPF|CTPS|RG|DATA|TELEFONE|ENDERECO|ENDEREÇO|EMAIL).*$", "", candidate, flags=re.IGNORECASE)
+        cleaned = clean_name(candidate)
+        if not cleaned:
+            continue
+
+        normalized_no_accents = unicodedata.normalize("NFKD", cleaned)
+        normalized_no_accents = "".join(ch for ch in normalized_no_accents if not unicodedata.combining(ch))
+        normalized_no_accents = normalized_no_accents.upper()
+
+        if re.search(r"\b(MEDIC|ODONTO|CRM|CRO|CARIMBO|RESPONSAVEL|RESPONSAVEL\b)\b", normalized_no_accents):
+            continue
+
+        # Evita capturar somente rótulos em vez de nome real.
+        if re.search(r"\b(ASSINATURA|EMPREGADO|EMPREGADOR|COLABORADOR|FUNCIONARIO|FUNCIONÁRIO|NOME|PACIENTE|CANDIDATO|TITULAR)\b", cleaned):
+            continue
+
+        if _is_valid_name_for_doc_type(cleaned, doc_type):
+            return cleaned
+
+    return None
+
+
+def _extract_name_from_filename(pdf_path: Path, doc_type: str | None) -> str | None:
+    """Extrai nome de pessoa a partir do nome do arquivo em formatos comuns.
+
+    Usa abordagem conservadora para evitar capturar cargo/tipo de documento.
+    """
+    stem = pdf_path.stem
+    if not stem:
+        return None
+
+    normalized = stem.upper()
+    if any(term in normalized for term in ("NAO IDENTIFICADO", "NÃO IDENTIFICADO", "SEM NOME", "NOME NAO LOCALIZADO", "ILEGIVEL", "ILLEGIVEL")):
+        return None
+
+    role_words = {
+        "ASSISTENTE", "AUXILIAR", "ANALISTA", "COORDENADOR", "GERENTE",
+        "CONTROLE", "JORNADA", "VAGA", "JOVEM", "APRENDIZ", "SEMINOVOS",
+    }
+
+    # Tentativa 1: "TIPO - NOME - DATA"
+    explicit = re.search(
+        r"^[^-]{3,}\s*-\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})\s*-\s*(?:\d{2}-\d{2}-\d{1,4}|\d{2}-\d{1,4}).*$",
+        stem,
+        re.IGNORECASE,
+    )
+    if explicit:
+        candidate = clean_name(explicit.group(1))
+        upper_candidate = candidate.upper()
+        if not any(word in upper_candidate.split() for word in role_words):
+            validation_type = doc_type or "GEN"
+            if _is_valid_name_for_doc_type(candidate, validation_type):
+                return candidate
+
+    # Tentativa 2: avaliar segmentos separados por " - "
+    parts = [p.strip() for p in re.split(r"\s+-\s+", stem) if p.strip()]
+    for part in parts:
+        if re.search(r"\d", part):
+            continue
+        candidate = clean_name(part)
+        if not candidate:
+            continue
+        upper_candidate = candidate.upper()
+        if any(word in upper_candidate.split() for word in role_words):
+            continue
+        validation_type = doc_type or "GEN"
+        if _is_valid_name_for_doc_type(candidate, validation_type):
+            return candidate
+
+    return None
+
+
 def _is_plausible_person_name(name: str | None) -> bool:
     """Valida formato basico de nome de pessoa para reduzir falsos positivos."""
     if not name:
@@ -1882,6 +2446,12 @@ def _is_plausible_person_name(name: str | None) -> bool:
             continue
         only_letters = re.sub(r"[^A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]", "", word)
         if len(only_letters) < 2:
+            return False
+        if len(only_letters) < 3:
+            return False
+        normalized_word = unicodedata.normalize("NFKD", only_letters)
+        normalized_word = "".join(ch for ch in normalized_word if not unicodedata.combining(ch))
+        if not re.search(r"[AEIOU]", normalized_word):
             return False
         if len(word) > 20:
             return False
@@ -1963,6 +2533,7 @@ def extract_mbv_data_from_rois(
     logger: logging.Logger,
 ) -> dict:
     """Extrai campos MBV por ROI/template (sem depender de OCR full-page para nome/data)."""
+    global _MBV_TEMPLATE_WARNING_EMITTED
     result: dict[str, str | None] = {
         "name": None,
         "period": None,
@@ -1997,6 +2568,11 @@ def extract_mbv_data_from_rois(
                 field_layer = cv2.resize(field_layer, (gray.shape[1], gray.shape[0]))
         else:
             field_layer = gray
+            if not _MBV_TEMPLATE_WARNING_EMITTED:
+                logger.warning(
+                    "MBV ROI: templates ausentes; usando fallback direto por ROI. Acuracia de MBV pode ficar reduzida."
+                )
+                _MBV_TEMPLATE_WARNING_EMITTED = True
             logger.debug(f"  MBV ROI: template ausente para pagina {page_idx + 1}, usando ROI direto")
 
         rois = MBV_FIELD_ROIS.get(page_idx, {})
@@ -2297,6 +2873,7 @@ def extract_text_from_pdf_adaptive(
 
         attempts: list[tuple[str, list[Image.Image], int]] = [
             ("dpi300_psm3_light", [preprocess_image_light(img) for img in pages], 3),
+            ("dpi300_psm3_enhanced", [preprocess_image_enhanced(img) for img in pages], 3),
             ("dpi300_psm3_tables", [preprocess_image_for_tables(img) for img in pages], 3),
             ("dpi300_psm6_default", [preprocess_image(img) for img in pages], 6),
         ]
@@ -2363,6 +2940,24 @@ def extract_text_from_pdf_adaptive(
     if quality_450 > quality_300:
         logger.debug(f"  Two-pass: mantendo texto 450 DPI por qualidade ({quality_300:.0%} -> {quality_450:.0%})")
         return text_450, None
+
+    logger.info("  Two-pass fallback final: tentando 600 DPI")
+    text_600, type_600 = extract_text_from_pdf(
+        pdf_path,
+        tesseract_path,
+        poppler_path,
+        logger,
+        base_dpi=600,
+    )
+
+    if type_600 is not None:
+        logger.info(f"  Two-pass: classificacao recuperada em 600 DPI ({type_600})")
+        return text_600, type_600
+
+    quality_600 = _text_quality_ratio(text_600)
+    if quality_600 > quality_300:
+        logger.debug(f"  Two-pass: mantendo texto 600 DPI por qualidade ({quality_300:.0%} -> {quality_600:.0%})")
+        return text_600, None
 
     return text_300, None
 
@@ -2494,6 +3089,15 @@ def clean_name(raw_name: str) -> str:
     name = name.upper()
     # Remover sufixos muito curtos gerados por ruido OCR (ex: "DOS SANTOS AX").
     name = re.sub(r'\s+[A-Z]{1,2}$', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    parts = [part for part in name.split(" ") if part]
+    if parts:
+        last_part_ascii = unicodedata.normalize("NFKD", parts[-1])
+        last_part_ascii = "".join(ch for ch in last_part_ascii if not unicodedata.combining(ch))
+        last_part_ascii = re.sub(r"[^A-Z]", "", last_part_ascii.upper())
+        if 0 < len(last_part_ascii) <= 2 and parts[-1] not in MBV_ALLOWED_SMALL_WORDS:
+            parts = parts[:-1]
+            name = " ".join(parts)
 
     if len(name) > 60:
         name = name[:60].rsplit(' ', 1)[0]
@@ -2503,13 +3107,8 @@ def clean_name(raw_name: str) -> str:
 def _correct_date_in_period(date_str: str) -> str:
     """Aplica correct_year a datas no formato DD/MM/YYYY ou DD-MM-YYYY."""
     # Tentar extrair ano de diferentes formatos
-    m = re.match(r'(\d{2}[/\-])(\d{2}[/\-])(\d{1,4})', date_str)
-    if m:
-        prefix = m.group(1) + m.group(2)
-        year = correct_year(m.group(3))
-        sep = "-" if "-" in date_str else "-"
-        return prefix.replace("/", "-") + year
-    return date_str
+    normalized = _extract_date_from_text(date_str)
+    return normalized or "SEM DATA"
 
 
 def _extract_named_doc_data(
@@ -2531,6 +3130,11 @@ def _extract_named_doc_data(
             result["name"] = candidate
             break
 
+    if not result["name"]:
+        contextual_name = _extract_name_from_labeled_lines(text, doc_type)
+        if contextual_name:
+            result["name"] = contextual_name
+
     if not result["name"] and fallback_name:
         result["name"] = fallback_name
 
@@ -2540,16 +3144,7 @@ def _extract_named_doc_data(
             if not match:
                 continue
 
-            if match.lastindex and match.lastindex >= 3:
-                day, month, year = match.group(1), match.group(2), correct_year(match.group(3))
-                result["period"] = f"{day}-{month}-{year}"
-            elif match.lastindex and match.lastindex == 2:
-                month, year = match.group(1), correct_year(match.group(2))
-                result["period"] = f"01-{month}-{year}" if len(month) == 2 else f"{month}-{year}"
-            elif match.lastindex and match.lastindex >= 1:
-                result["period"] = _normalize_competence_date(match.group(1))
-            else:
-                result["period"] = _normalize_competence_date(match.group(0))
+            result["period"] = _normalize_competence_date(match.group(0))
 
             break
 
@@ -2602,7 +3197,7 @@ def extract_atestado_medico_data(text: str) -> dict:
         date_patterns=[
             r"(\d{2})/(\d{2})/(\d{1,4})",
         ],
-        fallback_name="REVISAR NOME",
+        fallback_name=None,
     )
 
 
@@ -2707,34 +3302,82 @@ def extract_ppp_data(text: str) -> dict:
     )
 
 
+def _extract_recent_operational_doc_data(
+    text: str,
+    doc_type: str,
+    extra_name_patterns: list[str] | None = None,
+    extra_date_patterns: list[str] | None = None,
+    allow_fallback_name: bool = True,
+    use_generic_uppercase_pattern: bool = True,
+    extra_name_patterns_only: bool = False,
+) -> dict:
+    """Extrai dados de formularios operacionais recentes com heuristicas conservadoras."""
+    name_patterns = [
+        r"(?:[Nn]ome(?:\s+completo)?|[Cc]olaborador(?:\(a\))?|[Ee]mpregado(?:\(a\))?|[Cc]andidato|[Cc]ondutor|[Mm]otorist[ao]|[Tt]rabalhador)\s*[:\-]?\s*([A-Za-zÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃŽÃ”Ã›ÃƒÃ•Ã‡Ã¡Ã©Ã­Ã³ÃºÃ¢ÃªÃ®Ã´Ã»Ã£ÃµÃ§\s]{6,})",
+    ]
+    if extra_name_patterns_only:
+        name_patterns = []
+    if use_generic_uppercase_pattern:
+        name_patterns.append(
+            r"\b([A-ZÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃŽÃ”Ã›ÃƒÃ•Ã‡]{3,}(?:\s+[A-ZÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃŽÃ”Ã›ÃƒÃ•Ã‡]{3,}){1,6})\b"
+        )
+    if extra_name_patterns:
+        name_patterns = extra_name_patterns + name_patterns
+
+    date_patterns = [
+        r"(?:[Dd]ata|[Ee]miss[Ã£a]o|[Aa]valia[Ã§c][Ã£a]o|[Aa]plica[Ã§c][Ã£a]o|[Cc]ertifica[Ã§c][Ã£a]o|[Pp]er[Ã­i]odo|[Cc]ompet[Ãªe]ncia)\s*[:\-]?\s*(\d{2})/(\d{2})/(\d{1,4})",
+        r"(?:[Dd]ata|[Ee]miss[Ã£a]o|[Aa]valia[Ã§c][Ã£a]o|[Aa]plica[Ã§c][Ã£a]o|[Cc]ertifica[Ã§c][Ã£a]o|[Pp]er[Ã­i]odo|[Cc]ompet[Ãªe]ncia)\s*[:\-]?\s*(\d{2})-(\d{2})-(\d{1,4})",
+        r"(\d{2})/(\d{2})/(\d{1,4})",
+    ]
+    if extra_date_patterns:
+        date_patterns = extra_date_patterns + date_patterns
+
+    result = _extract_named_doc_data(
+        text,
+        doc_type,
+        name_patterns=name_patterns,
+        date_patterns=date_patterns,
+        fallback_name=None,
+    )
+
+    if allow_fallback_name and not result.get("name"):
+        fallback = extract_fallback_data(text)
+        fallback_name = fallback.get("name")
+        if fallback_name and _is_valid_name_for_doc_type(fallback_name, doc_type):
+            result["name"] = fallback_name
+
+    if result.get("period") and _is_suspicious_period(result["period"], doc_type, confidence_score=55.0):
+        result["period"] = None
+
+    return result
+
+
 def extract_avaliacao_motorista_data(text: str) -> dict:
     """Extrai dados de avaliacao de motorista."""
-    return _extract_named_doc_data(
+    return _extract_recent_operational_doc_data(
         text,
         "AVALIACAO_MOTORISTA",
-        name_patterns=[
+        extra_name_patterns=[
             r"(?:[Nn]ome|[Mm]otorist[ao]|[Cc]andidato)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
             r"\b([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}(?:\s+[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}){1,6})\b",
         ],
-        date_patterns=[
+        extra_date_patterns=[
             r"(?:[Dd]ata|[Ee]miss[ãa]o|[Aa]vali[aa][çc][ãa]o)\s*[:\-]?\s*(\d{2})/(\d{2})/(\d{1,4})",
-            r"(\d{2})/(\d{2})/(\d{1,4})",
         ],
     )
 
 
 def extract_teste_pratico_data(text: str) -> dict:
     """Extrai dados de teste pratico."""
-    return _extract_named_doc_data(
+    return _extract_recent_operational_doc_data(
         text,
         "TESTE_PRATICO",
-        name_patterns=[
+        extra_name_patterns=[
             r"(?:[Nn]ome|[Cc]andidato|[Cc]ondutor)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
             r"\b([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}(?:\s+[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}){1,6})\b",
         ],
-        date_patterns=[
+        extra_date_patterns=[
             r"(?:[Dd]ata|[Aa]vali[aa][çc][ãa]o)\s*[:\-]?\s*(\d{2})/(\d{2})/(\d{1,4})",
-            r"(\d{2})/(\d{2})/(\d{1,4})",
         ],
     )
 
@@ -2757,34 +3400,74 @@ def extract_teste_conhecimentos_gerais_data(text: str) -> dict:
 
 def extract_treinamento_direcao_defensiva_data(text: str) -> dict:
     """Extrai dados de treinamento de direção defensiva."""
-    return _extract_named_doc_data(
+    return _extract_recent_operational_doc_data(
         text,
         "TREINAMENTO_DIRECAO_DEFENSIVA",
-        name_patterns=[
+        extra_name_patterns=[
             r"(?:[Nn]ome|[Tt]rabalhador|[Cc]ondutor|[Mm]otorist[ao])\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
             r"\b([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}(?:\s+[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}){1,6})\b",
         ],
-        date_patterns=[
+        extra_date_patterns=[
             r"(?:[Dd]ata|[Cc]ertifica[çc][ãa]o|[Ee]miss[ãa]o)\s*[:\-]?\s*(\d{2})/(\d{2})/(\d{1,4})",
-            r"(\d{2})/(\d{2})/(\d{1,4})",
         ],
     )
 
 
 def extract_papeleta_controle_jornada_data(text: str) -> dict:
     """Extrai dados de papeleta de controle de jornada."""
-    return _extract_named_doc_data(
+    return _extract_recent_operational_doc_data(
         text,
         "PAPELETA_CONTROLE_JORNADA",
-        name_patterns=[
+        extra_name_patterns=[
             r"(?:[Nn]ome|[Cc]ondutor|[Mm]otorist[ao])\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
             r"\b([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}(?:\s+[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ]{2,}){1,6})\b",
         ],
-        date_patterns=[
+        extra_date_patterns=[
             r"(?:[Dd]ata|[Pp]er[íi]odo|[Cc]ompet[êe]ncia)\s*[:\-]?\s*(\d{2})/(\d{2})/(\d{1,4})",
-            r"(\d{2})/(\d{2})/(\d{1,4})",
         ],
     )
+
+
+def extract_treinamento_data(text: str) -> dict:
+    """Extrai dados de treinamentos customizados com OCR fraco."""
+    result = _extract_recent_operational_doc_data(
+        text,
+        "TREINAMENTO",
+        extra_name_patterns=[
+            r"(?:[Nn]ome|[Cc]olaborador|[Ee]mpregado|[Mm]otorist[ao])\s*[:\-]?\s*([A-Za-zÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃŽÃ”Ã›ÃƒÃ•Ã‡Ã¡Ã©Ã­Ã³ÃºÃ¢ÃªÃ®Ã´Ã»Ã£ÃµÃ§\s]{6,})",
+        ],
+        extra_date_patterns=[
+            r"(?:[Dd]ata|[Ee]miss[Ã£a]o|[Rr]ealiza[Ã§c][Ã£a]o)\s*[:\-]?\s*(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        allow_fallback_name=False,
+        use_generic_uppercase_pattern=False,
+        extra_name_patterns_only=True,
+    )
+    result["name"] = None
+    return result
+
+
+def extract_papeleta_data(text: str) -> dict:
+    """Extrai dados para papeletas customizadas classificadas fora do tipo completo."""
+    result = _extract_recent_operational_doc_data(
+        text,
+        "PAPELETA",
+        extra_name_patterns=[
+            r"(?:[Nn]ome|[Cc]ondutor|[Mm]otorist[ao]|[Cc]olaborador)\s*[:\-]?\s*([A-Za-zÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃŽÃ”Ã›ÃƒÃ•Ã‡Ã¡Ã©Ã­Ã³ÃºÃ¢ÃªÃ®Ã´Ã»Ã£ÃµÃ§\s]{6,})",
+        ],
+        extra_date_patterns=[
+            r"(?:[Dd]ata|[Pp]er[Ã­i]odo|[Cc]ompet[Ãªe]ncia)\s*[:\-]?\s*(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        allow_fallback_name=False,
+        use_generic_uppercase_pattern=False,
+        extra_name_patterns_only=True,
+    )
+    labeled_name = _extract_name_from_labeled_lines(text, "PAPELETA")
+    if labeled_name:
+        result["name"] = labeled_name
+    elif result.get("name") and not _is_valid_name_for_doc_type(result["name"], "PAPELETA"):
+        result["name"] = None
+    return result
 
 
 def extract_questionario_acolhimento_data(text: str) -> dict:
@@ -2959,6 +3642,19 @@ def extract_fmm_data(text: str) -> dict:
                 month = period_ref.group(1)
                 year = correct_year(period_ref.group(2))
                 result["period"] = f"{month}-{year}"
+            else:
+                generic_range = re.search(
+                    r'(\d{2}/\d{2}/\d{1,4})\s*(?:a|ate|até)\s*(\d{2}/\d{2}/\d{1,4})',
+                    text,
+                    re.IGNORECASE,
+                )
+                if generic_range:
+                    end = _correct_date_in_period(generic_range.group(2))
+                    result["period"] = end
+                else:
+                    single_date = _extract_date_from_text(text)
+                    if single_date:
+                        result["period"] = single_date
 
     return result
 
@@ -3138,6 +3834,12 @@ def extract_fallback_data(text: str) -> dict:
         r'[Bb]enefici.?rio\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
         r'[Tt]itular\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
         r'Sr\s*\(?a?\)?\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+        r'[Cc]olaborador(?:\(a\))?\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+        r'[Ee]mpregado(?:\(a\))?\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+        r'[Ff]uncion[áa]rio(?:\(a\))?\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+        r'[Cc]andidato(?:\(a\))?\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+        r'[Pp]aciente\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+        r'Eu\s*,\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})\s*,\s*(?:inscrito|portador|declaro)',
     ]
 
     for pattern in name_patterns:
@@ -3150,9 +3852,16 @@ def extract_fallback_data(text: str) -> dict:
                 break
 
     if not result["name"]:
+        contextual_name = _extract_name_from_labeled_lines(text, "GEN")
+        if contextual_name:
+            result["name"] = contextual_name
+
+    if not result["name"]:
         for line in text.splitlines():
             compact = re.sub(r'\s+', ' ', line).strip()
             if not compact:
+                continue
+            if len(compact.split()) > 6:
                 continue
             if re.fullmatch(r'[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]{8,}', compact):
                 cleaned = clean_name(compact)
@@ -3171,13 +3880,21 @@ def extract_fallback_data(text: str) -> dict:
     if month_year:
         month = month_year.group(1)
         year = correct_year(month_year.group(2))
-        result["period"] = f"{month}-{year}"
-        return result
+        try:
+            if 1 <= int(month) <= 12:
+                result["period"] = f"{month}-{year}"
+                return result
+        except ValueError:
+            pass
 
     single_date = re.search(r'(\d{2})/(\d{2})/(\d{1,4})', text)
     if single_date:
         day, month, year = single_date.group(1), single_date.group(2), correct_year(single_date.group(3))
-        result["period"] = f"{day}-{month}-{year}"
+        try:
+            if 1 <= int(day) <= 31 and 1 <= int(month) <= 12:
+                result["period"] = f"{day}-{month}-{year}"
+        except ValueError:
+            pass
 
     return result
 
@@ -3223,20 +3940,20 @@ def extract_advertencia_escrita_data(text: str) -> dict:
 
     # Nome: "COLABORADOR(a): NOME" - extrair do campo COLABORADOR, não EMPREGADOR
     name_patterns = [
-        # Formato 1: "COLABORADOR(a): NOME"
-        r'COLABORADOR\s*\(\s*a\s*\)\s*:\s*([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]{3,})',
-        # Formato 2: "COLABORADOR: NOME" (sem parênteses)
-        r'COLABORADOR\s*:\s*([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]{3,})',
-        # Formato 3: caixa mista/OCR errado
-        r'[Cc]olaborador\s*(\(a\))?\s*:\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
+        # Formato 1: "COLABORADOR(A): NOME" (com ou sem espaços)
+        r'COLABORADOR\s*\(\s*A\s*\)\s*[:\-]?\s*([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]{3,})',
+        # Formato 2: "COLABORADOR: NOME"
+        r'COLABORADOR\s*[:\-]?\s*([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]{3,})',
+        # Formato 3: "Eu, NOME, portador(a) do CPF"
+        r'Eu\s*,\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})\s*,\s*portador(?:a)?\s+do\s+CPF',
+        # Formato 4: caixa mista/OCR
+        r'[Cc]olaborador\s*(?:\(a\))?\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç][A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{3,})',
     ]
     
-    for idx, pattern in enumerate(name_patterns):
+    for pattern in name_patterns:
         match = re.search(pattern, text)
         if match:
-            # Para o formato 3, o nome está no grupo 2
-            name_group = 2 if idx == 2 else 1
-            raw_name = match.group(name_group).strip()
+            raw_name = match.group(1).strip()
             # Remover "CPF" e similares que possam estar colados
             raw_name = re.sub(r'\s*(CPF|CTPS|RG).*$', '', raw_name)
             cleaned = clean_name(raw_name)
@@ -3273,41 +3990,144 @@ def detect_multiple_documents_in_pdf(text_pages: list[str], doc_type: str, logge
     
     documents = []
     current_doc = None
-    
+
     for page_idx, page_text in enumerate(text_pages):
-        # Tenta extrair dados de fechamento desta página
         data = extract_fmm_data(page_text)
-        
-        if data.get("closing_number") or data.get("name"):
-            # Esta página pertence a um documento FMM
-            closing_num = data.get("closing_number")
-            name = data.get("name")
-            
-            # Se mudou motorista ou número, inicia novo documento
-            if not current_doc or current_doc["name"] != name:
-                if current_doc:
-                    documents.append(current_doc)
-                current_doc = {
-                    "name": name or "MOTORISTA DESCONHECIDO",
-                    "closing_numbers": [closing_num] if closing_num else [],
-                    "page_indices": [page_idx],
-                    "period": data.get("period"),
-                }
-            else:
-                # Mesmo motorista, adiciona número se diferente
-                if closing_num and closing_num not in current_doc["closing_numbers"]:
-                    current_doc["closing_numbers"].append(closing_num)
-                current_doc["page_indices"].append(page_idx)
-                # Atualiza período com a data mais recente
-                if data.get("period"):
-                    current_doc["period"] = data.get("period")
-    
-    # Adiciona último documento se existe
+        detected_name = data.get("name")
+        detected_period = data.get("period")
+        closing_num = data.get("closing_number")
+
+        if current_doc is None:
+            current_doc = {
+                "name": detected_name or "MOTORISTA DESCONHECIDO",
+                "closing_numbers": [closing_num] if closing_num else [],
+                "page_indices": [page_idx],
+                "period": detected_period,
+            }
+            continue
+
+        start_new_doc = False
+        if detected_name and current_doc.get("name") and detected_name != current_doc.get("name"):
+            start_new_doc = True
+        if detected_period and current_doc.get("period") and detected_period != current_doc.get("period"):
+            start_new_doc = True
+
+        if start_new_doc:
+            documents.append(current_doc)
+            current_doc = {
+                "name": detected_name or current_doc.get("name") or "MOTORISTA DESCONHECIDO",
+                "closing_numbers": [closing_num] if closing_num else [],
+                "page_indices": [page_idx],
+                "period": detected_period,
+            }
+            continue
+
+        current_doc["page_indices"].append(page_idx)
+        if detected_name:
+            current_doc["name"] = detected_name
+        if closing_num and closing_num not in current_doc["closing_numbers"]:
+            current_doc["closing_numbers"].append(closing_num)
+        if detected_period:
+            current_doc["period"] = detected_period
+
     if current_doc:
         documents.append(current_doc)
-    
+
     logger.debug(f"Detectados {len(documents)} documentos em {len(text_pages)} páginas")
     return documents
+
+
+def extract_fmm_text_by_page(
+    pdf_path: Path,
+    tesseract_path: str,
+    poppler_path: str | None,
+    logger: logging.Logger,
+) -> list[str]:
+    """Extrai OCR página-a-página para FMM multipágina."""
+    images = pdf_to_images(pdf_path, poppler_path, dpi=OCR_DPI)
+    pages_to_process = images if MAX_PAGES_TO_OCR is None else images[:MAX_PAGES_TO_OCR]
+
+    page_texts: list[str] = []
+    config_primary = build_ocr_config(psm=6)
+    config_fallback = build_ocr_config(psm=3)
+
+    for idx, image in enumerate(pages_to_process):
+        processed_primary = preprocess_image_for_tables(image)
+        text_primary = normalize_ocr_text(ocr_image(processed_primary, tesseract_path, config=config_primary))
+
+        if len(text_primary.strip()) < 40:
+            processed_fallback = preprocess_image_light(image)
+            text_fallback = normalize_ocr_text(ocr_image(processed_fallback, tesseract_path, config=config_fallback))
+            chosen = text_fallback if len(text_fallback) > len(text_primary) else text_primary
+        else:
+            chosen = text_primary
+
+        page_texts.append(chosen)
+        logger.debug(f"  FMM split OCR página {idx + 1}: {len(chosen)} chars")
+
+    return page_texts
+
+
+def split_fmm_pdf_by_period_and_driver(
+    pdf_path: Path,
+    scanner_dir: Path,
+    docs: list[dict],
+    logger: logging.Logger,
+) -> list[Path]:
+    """Gera PDFs separados para FMM multipágina por motorista/período."""
+    if not docs or len(docs) <= 1:
+        return []
+
+    if PdfReader is None or PdfWriter is None:
+        logger.warning("Split FMM multipágina indisponível: instale 'pypdf'.")
+        return []
+
+    reader = PdfReader(str(pdf_path))
+    created_paths: list[Path] = []
+    expected_outputs = 0
+    had_generation_error = False
+
+    for index, doc in enumerate(docs, start=1):
+        page_indices = doc.get("page_indices") or []
+        valid_indices = [i for i in page_indices if isinstance(i, int) and 0 <= i < len(reader.pages)]
+        if not valid_indices:
+            logger.warning(f"  Split FMM bloco {index} sem páginas válidas - ignorado")
+            continue
+
+        expected_outputs += 1
+
+        try:
+            writer = PdfWriter()
+            for page_idx in valid_indices:
+                writer.add_page(reader.pages[page_idx])
+
+            extracted_name = doc.get("name") or "NOME NAO LOCALIZADO"
+            extracted_period = doc.get("period") or "SEM PERIODO"
+            closing_number = doc.get("closing_number")
+            split_filename = build_new_filename("FMM", extracted_name, extracted_period, closing_number=closing_number)
+            split_target = resolve_filename_conflict(scanner_dir / split_filename)
+
+            with split_target.open("wb") as fh:
+                writer.write(fh)
+
+            created_paths.append(split_target)
+            logger.info(
+                f"  FMM split gerado ({index}/{len(docs)}): {split_target.name} "
+                f"[{len(valid_indices)} página(s)]"
+            )
+        except Exception as e:
+            had_generation_error = True
+            logger.warning(f"  Falha ao gerar bloco FMM {index}: {e}")
+
+    if expected_outputs > 0 and not had_generation_error and len(created_paths) == expected_outputs:
+        pdf_path.unlink(missing_ok=True)
+        logger.info(f"  PDF original removido após split: {pdf_path.name}")
+    elif created_paths:
+        logger.warning(
+            "  Split FMM parcial detectado: PDF original mantido para evitar perda de dados."
+        )
+
+    return created_paths
 
 def aggregate_multipage_closure(documents: list[dict]) -> list[dict]:
     """Agrupa números de fechamento para motoristas que aparecem múltiplas vezes.
@@ -3367,41 +4187,177 @@ def extract_nf_data(text: str) -> dict:
         result["period"] = _correct_date_in_period(match.group(1).replace("/", "-"))
         break
 
-    if not result["name"]:
-        result["name"] = "NOTA FISCAL"
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "NF"):
+        result["name"] = None
 
     return result
 
 
 def extract_recibo_data(text: str) -> dict:
     """Extrai dados de Recibo com heuristica administrativa."""
-    result = extract_fallback_data(text)
+    result = _extract_named_doc_data(
+        text,
+        "RECIBO",
+        name_patterns=[
+            r"(?:Recebi(?:mos)?\s+de|Pagador|Recebedor|Favorecido|Cliente|Nome)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+            r"Eu\s*,\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})\s*,",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
     if not result.get("name"):
-        result["name"] = "RECIBO"
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+        if fallback.get("period") and not result.get("period"):
+            result["period"] = fallback.get("period")
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "RECIBO"):
+        result["name"] = None
     return result
 
 
 def extract_declaracao_data(text: str) -> dict:
     """Extrai dados de Declaracao com heuristica administrativa."""
-    result = extract_fallback_data(text)
+    result = _extract_named_doc_data(
+        text,
+        "DECLARACAO",
+        name_patterns=[
+            r"(?:Declarante|Declarant[ea]|Nome)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+            r"Eu\s*,\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})\s*,",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
     if not result.get("name"):
-        result["name"] = "DECLARACAO"
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+        if fallback.get("period") and not result.get("period"):
+            result["period"] = fallback.get("period")
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "DECLARACAO"):
+        result["name"] = None
     return result
 
 
 def extract_contrato_data(text: str) -> dict:
     """Extrai dados de Contrato com heuristica administrativa."""
-    result = extract_fallback_data(text)
+    result = _extract_named_doc_data(
+        text,
+        "CONTRATO",
+        name_patterns=[
+            r"EMPREGADO\s*\(\s*A\s*\)\s*[:\-\.]?\s*([^\n\r]{6,80})",
+            r"CONTRATADO\s*\(\s*A\s*\)\s*[:\-\.]?\s*([^\n\r]{6,80})",
+            r"(?:Contratado\s*\(\s*a\s*\)|Contratado|Empregado\s*\(\s*a\s*\)|Empregado)\s*[:\-\.]?\s*([^\n\r]{6,80})",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
     if not result.get("name"):
-        result["name"] = "CONTRATO"
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+        if fallback.get("period") and not result.get("period"):
+            result["period"] = fallback.get("period")
+    if result.get("name"):
+        result["name"] = re.sub(r"^(?:EMPREGADO|CONTRATADO)\s*\(\s*A\s*\)\s*", "", result["name"], flags=re.IGNORECASE).strip()
+        name_upper = result["name"].upper()
+        if any(token in name_upper for token in ("LTDA", "CNPJ", "TRANSPORTADORA BRASIL CENTRAL")):
+            result["name"] = None
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "CONTRATO"):
+        result["name"] = None
+    return result
+
+
+def extract_alteracao_beneficiarios_data(text: str) -> dict:
+    """Extrai dados de Alteracao/Indicacao de Beneficiarios (ex.: Icatu)."""
+    result = _extract_named_doc_data(
+        text,
+        "ALTERACAO_BENEFICIARIOS",
+        name_patterns=[
+            r"(?:Titular|Segurado|Proponente|Nome)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
+
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "ALTERACAO_BENEFICIARIOS"):
+        result["name"] = None
+
+    return result
+
+
+def extract_dut_declaracao_data(text: str) -> dict:
+    """Extrai dados para declaracoes envolvendo DUT."""
+    result = _extract_named_doc_data(
+        text,
+        "DUT_DECLARACAO",
+        name_patterns=[
+            r"(?:Declarante|Nome|Propriet[áa]rio|Comprador|Vendedor)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+            r"DUT\s+([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
+    if not result.get("name"):
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "DUT_DECLARACAO"):
+        result["name"] = None
+    return result
+
+
+def extract_politica_violacoes_velocidade_data(text: str) -> dict:
+    """Extrai dados para política de violações de velocidade."""
+    result = _extract_named_doc_data(
+        text,
+        "POLITICA_VIOLACOES_VELOCIDADE",
+        name_patterns=[
+            r"(?:Colaborador|Empregado|Condutor|Motorista|Nome)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+            r"(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "POLITICA_VIOLACOES_VELOCIDADE"):
+        result["name"] = None
     return result
 
 
 def extract_comprovante_data(text: str) -> dict:
     """Extrai dados de Comprovante com heuristica administrativa."""
-    result = extract_fallback_data(text)
+    result = _extract_named_doc_data(
+        text,
+        "COMPROVANTE",
+        name_patterns=[
+            r"(?:Favorecido|Benefici.?rio|Cliente|Nome)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+            r"(?:Titular\s+da\s+conta|Titular)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
     if not result.get("name"):
-        result["name"] = "COMPROVANTE"
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+        if fallback.get("period") and not result.get("period"):
+            result["period"] = fallback.get("period")
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "COMPROVANTE"):
+        result["name"] = None
     return result
 
 
@@ -3419,12 +4375,22 @@ def extract_relatorio_abastecimento_data(text: str) -> dict:
             result["name"] = candidate
 
     if not result.get("name"):
+        motorista_alt = re.search(
+            r"(?:[Cc]ondutor|[Mm]otorista)\s*[:\-]?\s*\n?\s*(?:\d{3,6}\s*)?([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{5,})",
+            text,
+        )
+        if motorista_alt:
+            candidate = clean_name(motorista_alt.group(1))
+            if candidate and _is_valid_name_for_doc_type(candidate, "RELATORIO_ABASTECIMENTO"):
+                result["name"] = candidate
+
+    if not result.get("name"):
         fallback = extract_fallback_data(text)
         if fallback.get("name"):
             result["name"] = fallback.get("name")
 
-    if not result.get("name"):
-        result["name"] = "ABASTECIMENTO"
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "RELATORIO_ABASTECIMENTO"):
+        result["name"] = None
 
     range_match = re.search(r"(\d{2}/\d{2}/\d{1,4})\s*a\s*(\d{2}/\d{2}/\d{1,4})", text)
     if range_match:
@@ -3441,14 +4407,61 @@ def extract_relatorio_abastecimento_data(text: str) -> dict:
 
 def extract_solicitacao_contratacao_data(text: str) -> dict:
     """Extrai dados de e-mails de solicitação/autorização de contratação."""
-    result = extract_fallback_data(text)
+    result = _extract_named_doc_data(
+        text,
+        "SOLICITACAO_CONTRATACAO",
+        name_patterns=[
+            r"(?:Candidato|Colaborador|Empregado|Nome)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+            r"Eu\s*,\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})\s*,",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
+
     if not result.get("name"):
-        result["name"] = "SOLICITACAO CONTRATACAO"
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+        if fallback.get("period") and not result.get("period"):
+            result["period"] = fallback.get("period")
+
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "SOLICITACAO_CONTRATACAO"):
+        result["name"] = None
 
     if not result.get("period"):
         date = _extract_date_from_text(text)
         if date:
             result["period"] = date
+
+    return result
+
+
+def extract_abertura_vaga_data(text: str) -> dict:
+    """Extrai dados de documentos de abertura/requisição de vaga."""
+    result = _extract_named_doc_data(
+        text,
+        "ABERTURA_VAGA",
+        name_patterns=[
+            r"(?:Candidato|Nome\s+do\s+Candidato|Colaborador|Empregado)\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÂÊÎÔÛÃÕÇáéíóúâêîôûãõç\s]{6,})",
+        ],
+        date_patterns=[
+            r"(\d{2})/(\d{2})/(\d{1,4})",
+            r"(\d{2})-(\d{2})-(\d{1,4})",
+        ],
+        fallback_name=None,
+    )
+
+    if not result.get("name"):
+        fallback = extract_fallback_data(text)
+        if fallback.get("name"):
+            result["name"] = fallback.get("name")
+        if fallback.get("period") and not result.get("period"):
+            result["period"] = fallback.get("period")
+
+    if result.get("name") and not _is_valid_name_for_doc_type(result["name"], "ABERTURA_VAGA"):
+        result["name"] = None
 
     return result
 
@@ -3473,7 +4486,9 @@ EXTRACTORS = {
     "TESTE_PRATICO": extract_teste_pratico_data,
     "TESTE_CONHECIMENTOS_GERAIS": extract_teste_conhecimentos_gerais_data,
     "TREINAMENTO_DIRECAO_DEFENSIVA": extract_treinamento_direcao_defensiva_data,
+    "TREINAMENTO": extract_treinamento_data,
     "PAPELETA_CONTROLE_JORNADA": extract_papeleta_controle_jornada_data,
+    "PAPELETA": extract_papeleta_data,
     "QUESTIONARIO_ACOLHIMENTO": extract_questionario_acolhimento_data,
     "DECLARACAO_RACIAL": extract_declaracao_racial_data,
     "NF": extract_nf_data,
@@ -3483,6 +4498,10 @@ EXTRACTORS = {
     "COMPROVANTE": extract_comprovante_data,
     "RELATORIO_ABASTECIMENTO": extract_relatorio_abastecimento_data,
     "SOLICITACAO_CONTRATACAO": extract_solicitacao_contratacao_data,
+    "ABERTURA_VAGA": extract_abertura_vaga_data,
+    "ALTERACAO_BENEFICIARIOS": extract_alteracao_beneficiarios_data,
+    "DUT_DECLARACAO": extract_dut_declaracao_data,
+    "POLITICA_VIOLACOES_VELOCIDADE": extract_politica_violacoes_velocidade_data,
 }
 
 
@@ -3528,7 +4547,9 @@ DOC_TYPE_LABELS = {
     "TESTE_PRATICO": "TESTE PRATICO",
     "TESTE_CONHECIMENTOS_GERAIS": "TESTE CONHECIMENTOS GERAIS",
     "TREINAMENTO_DIRECAO_DEFENSIVA": "TREINAMENTO DIRECAO DEFENSIVA",
+    "TREINAMENTO": "TREINAMENTO",
     "PAPELETA_CONTROLE_JORNADA": "PAPELETA CONTROLE JORNADA",
+    "PAPELETA": "PAPELETA",
     "QUESTIONARIO_ACOLHIMENTO": "QUESTIONARIO ACOLHIMENTO",
     "DECLARACAO_RACIAL": "DECLARACAO RACIAL",
     "NF": "NOTA FISCAL",
@@ -3538,6 +4559,10 @@ DOC_TYPE_LABELS = {
     "COMPROVANTE": "COMPROVANTE",
     "RELATORIO_ABASTECIMENTO": "RELATORIO ABASTECIMENTO",
     "SOLICITACAO_CONTRATACAO": "SOLICITACAO CONTRATACAO",
+    "ABERTURA_VAGA": "ABERTURA VAGA",
+    "ALTERACAO_BENEFICIARIOS": "ALTERACAO BENEFICIARIOS",
+    "DUT_DECLARACAO": "DUT DECLARACAO",
+    "POLITICA_VIOLACOES_VELOCIDADE": "POLITICA VIOLACOES VELOCIDADE",
     "GEN": "DOCUMENTO",
 }
 
@@ -3560,11 +4585,11 @@ def _doc_type_to_label(doc_type: str) -> str:
 
 
 def _normalize_competence_date(period: str | None) -> str:
-    """Normaliza competencia para uma data unica no formato DD-MM-YYYY.
+    """Normaliza competencia para uma data unica no formato DD-MM-YYYY ou MM-YYYY.
 
     Regras:
     - Se houver data completa no texto, usa a primeira encontrada.
-    - Se houver apenas MM-YYYY, converte para 01-MM-YYYY.
+    - Se houver apenas MM-YYYY, preserva o mes/ano sem inventar dia.
     - Se ausente, retorna SEM DATA.
     """
     if not period:
@@ -3574,15 +4599,35 @@ def _normalize_competence_date(period: str | None) -> str:
     if not text:
         return "SEM DATA"
 
-    full_date = re.search(r"(\d{2})[/-](\d{2})[/-](\d{1,4})", text)
-    if full_date:
-        day, month, year = full_date.group(1), full_date.group(2), correct_year(full_date.group(3))
-        return f"{day}-{month}-{year}"
+    # Intervalo de datas: usa a data final quando disponível
+    date_range = re.search(
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{1,4})\s*(?:a|ate|até)\s*(\d{1,2}[/-]\d{1,2}[/-]\d{1,4})",
+        text,
+        re.IGNORECASE,
+    )
+    if date_range:
+        end = _correct_date_in_period(date_range.group(2))
+        if end != "SEM DATA":
+            return end
 
-    month_year = re.search(r"(\d{2})[/-](\d{4})", text)
+    full_date = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{1,4})\b", text)
+    if full_date:
+        normalized = _normalize_date_parts(full_date.group(1), full_date.group(2), full_date.group(3))
+        if normalized:
+            return normalized
+
+    month_year = re.search(r"\b(\d{1,2})[/-](\d{2,4})(?![/-]\d)\b", text)
     if month_year:
-        month, year = month_year.group(1), month_year.group(2)
-        return f"01-{month}-{year}"
+        month = _ocr_digits(month_year.group(1))
+        year = _ocr_digits(month_year.group(2))
+        if month and year:
+            month_int = int(month)
+            if 1 <= month_int <= 12:
+                return f"{month_int:02d}-{correct_year(year)}"
+
+    extracted = _extract_date_from_text(text)
+    if extracted:
+        return extracted
 
     return "SEM DATA"
 
@@ -3617,33 +4662,17 @@ def resolve_filename_conflict(target_path: Path) -> Path:
 
 
 def quarantine_failed_pdf(pdf_path: Path, scanner_dir: Path, logger: logging.Logger) -> Path | None:
-    """Move um PDF com erro permanente para uma pasta de quarentena."""
-    quarantine_dir = scanner_dir / QUARANTINE_DIR_NAME
-    quarantine_dir.mkdir(exist_ok=True)
-
-    target_path = resolve_filename_conflict(quarantine_dir / pdf_path.name)
-    try:
-        shutil.move(str(pdf_path), str(target_path))
-        logger.warning(f"  PDF enviado para quarentena: {target_path.name}")
-        return target_path
-    except Exception as e:
-        logger.warning(f"  Falha ao mover para quarentena: {e}")
-        return None
+    """Mantém compatibilidade sem mover arquivo (política: apenas renomear)."""
+    _ = scanner_dir
+    logger.warning(f"  Quarentena desabilitada: arquivo mantido no diretório original ({pdf_path.name})")
+    return pdf_path
 
 
 def move_to_review_queue(pdf_path: Path, scanner_dir: Path, logger: logging.Logger) -> Path | None:
-    """Move um PDF com baixa confiança para fila de revisao manual."""
-    review_dir = scanner_dir / REVIEW_DIR_NAME
-    review_dir.mkdir(exist_ok=True)
-
-    target_path = resolve_filename_conflict(review_dir / pdf_path.name)
-    try:
-        shutil.move(str(pdf_path), str(target_path))
-        logger.warning(f"  PDF enviado para revisao: {target_path.name}")
-        return target_path
-    except Exception as e:
-        logger.warning(f"  Falha ao mover para revisao: {e}")
-        return None
+    """Mantém compatibilidade sem mover arquivo (política: apenas renomear)."""
+    _ = scanner_dir
+    logger.warning(f"  Revisão sem movimentação: arquivo mantido no diretório original ({pdf_path.name})")
+    return pdf_path
 
 
 # =============================================================================
@@ -3724,8 +4753,8 @@ def process_single_pdf(
     if CONFIDENCE_MONITOR_AVAILABLE:
         try:
             confidence_monitor = ConfidenceMonitor()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"Confidence monitor indisponivel para este processamento: {exc}")
 
     try:
         # Validacao de integridade antes de OCR
@@ -3794,8 +4823,7 @@ def process_single_pdf(
                 result.extracted_period = data.get("period")
 
                 if not result.extracted_name:
-                    # Não usa fallback caixa alta para MBV; força revisão humana.
-                    result.extracted_name = "REVISAR NOME"
+                    result.extracted_name = "NOME NAO LOCALIZADO"
 
                 if not result.extracted_period:
                     result.extracted_period = "SEM PERIODO"
@@ -3808,15 +4836,30 @@ def process_single_pdf(
                 if doc_type == "FMM":
                     result.extracted_closing_number = data.get("closing_number")
 
+                    # FMM multipágina: separar em PDFs por motorista/período quando detectar mudança.
+                    try:
+                        fmm_pages_text = extract_fmm_text_by_page(pdf_path, tesseract_path, poppler_path, logger)
+                        raw_docs = detect_multiple_documents_in_pdf(fmm_pages_text, "FMM", logger)
+                        docs = aggregate_multipage_closure(raw_docs)
+                        split_paths = split_fmm_pdf_by_period_and_driver(pdf_path, scanner_dir, docs, logger)
+
+                        if split_paths:
+                            result.new_path = split_paths[0]
+                            result.status = ProcessStatus.RENAMED
+                            logger.info(f"  FMM multipágina dividido em {len(split_paths)} arquivo(s)")
+                            return result
+                    except Exception as split_err:
+                        logger.warning(f"  Falha no split FMM multipágina: {split_err}")
+
             # Validação final transversal de nome (edge cases para todos os tipos).
-            if result.extracted_name and result.extracted_name != "REVISAR NOME":
+            if result.extracted_name and result.extracted_name != "NOME NAO LOCALIZADO":
                 validation_type = result.doc_type if result.doc_type else "GEN"
                 if not _is_valid_name_for_doc_type(result.extracted_name, validation_type):
                     logger.warning(
                         f"  Nome rejeitado por validacao ({validation_type}): {result.extracted_name}"
                     )
                     if validation_type == "MBV":
-                        result.extracted_name = "REVISAR NOME"
+                        result.extracted_name = "NOME NAO LOCALIZADO"
                     else:
                         result.status = ProcessStatus.UNIDENTIFIED
                         return result
@@ -3824,8 +4867,13 @@ def process_single_pdf(
             if not result.extracted_name:
                 # Fallback: se tipo foi identificado, renomear com tipo de documento no lugar do nome
                 if result.doc_type and result.doc_type != "GEN":
-                    logger.warning(f"  Tipo={doc_type} mas nome nao encontrado - usando SEM NOME")
-                    result.extracted_name = "SEM NOME"
+                    filename_name = _extract_name_from_filename(pdf_path, result.doc_type)
+                    if filename_name:
+                        logger.info(f"  Nome via filename fallback: {filename_name}")
+                        result.extracted_name = filename_name
+                    else:
+                        logger.warning(f"  Tipo={doc_type} mas nome nao encontrado - usando NOME NAO LOCALIZADO")
+                        result.extracted_name = "NOME NAO LOCALIZADO"
                     # Garantir que temos período para o arquivo
                     if not result.extracted_period:
                         result.extracted_period = "SEM DATA"
@@ -3838,6 +4886,13 @@ def process_single_pdf(
             if not result.extracted_period and doc_type not in {"MBV"}:
                 logger.warning(f"  Tipo={doc_type} nome={result.extracted_name} mas periodo nao encontrado")
                 result.extracted_period = "SEM PERIODO"
+
+            if _is_suspicious_period(result.extracted_period, result.doc_type, result.confidence_score):
+                logger.warning(
+                    f"  Data suspeita para {result.doc_type} em OCR de baixa confianca: {result.extracted_period}. "
+                    "Substituindo por SEM DATA."
+                )
+                result.extracted_period = "SEM DATA"
 
             logger.info(f"  Nome: {result.extracted_name}")
             if result.extracted_closing_number and result.doc_type == "FMM":
@@ -3853,14 +4908,14 @@ def process_single_pdf(
                 f"  Confidence abaixo do minimo para {result.doc_type} "
                 f"({result.confidence_score:.1f}% < {min_required:.1f}%)."
             )
-            review_path = move_to_review_queue(pdf_path, scanner_dir, logger)
-            if review_path is None:
-                result.status = ProcessStatus.ERROR
-                result.error_message = "Falha ao enviar para revisao"
-            else:
+            poor_name_signal = result.extracted_name in {None, "NOME NAO LOCALIZADO", "REVISAR NOME"}
+            poor_period_signal = result.extracted_period in {None, "SEM DATA", "SEM PERIODO"}
+            if result.confidence_score < max(50.0, min_required - 15.0) and (poor_name_signal or poor_period_signal):
+                logger.warning("  Confianca muito baixa com campos fracos: mantendo arquivo sem renomeacao para REVISAO.")
                 result.status = ProcessStatus.REVIEW
-                result.new_path = review_path
-            return result
+                return result
+
+            logger.warning("  Gate de confianca ativo: mantendo arquivo para RENOMEACAO sem mover para _REVISAO.")
 
         # Renomear (no diretorio do scanner, nao hardcoded)
         type_for_filename = result.doc_type if result.doc_type else "GEN"
@@ -4124,7 +5179,7 @@ def run_one_shot(
         logger,
         processed_files,
         checkpoint_file,
-        defer_on_transient=False,
+        defer_on_transient=True,
         quarantine_permanent_errors=False,
         max_workers=DEFAULT_WATCH_MAX_WORKERS,
         confidence_gate_enabled=confidence_gate_enabled,
@@ -4439,7 +5494,7 @@ def main():
     scanner_dir = Path(config.get("scanner_dir", str(DEFAULT_SCANNER_DIR)))
     confidence_thresholds = config.get("confidence_thresholds", {})
     confidence_baseline = float(config.get("confidence_baseline", DEFAULT_MIN_CONFIDENCE_BASELINE))
-    confidence_gate_enabled = bool(config.get("confidence_gate_enabled", True))
+    confidence_gate_enabled = config.get("confidence_gate_enabled", True)
 
     if not scanner_dir.is_dir():
         print(f"ERRO: Pasta de scanner nao encontrada: {scanner_dir}")
@@ -4452,6 +5507,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Pasta de entrada: {scanner_dir}")
     logger.info(f"Projeto: {PROJECT_ROOT}")
+    log_optional_runtime_warnings(logger)
 
     # Validar tessdata
     try:
